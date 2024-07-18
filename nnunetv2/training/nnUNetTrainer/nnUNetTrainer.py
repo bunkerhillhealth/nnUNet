@@ -625,6 +625,7 @@ class nnUNetTrainer(object):
                                            transform=val_transforms, num_processes=max(1, allowed_num_processes // 2),
                                            num_cached=50, seeds=None, pin_memory=self.device.type == 'cuda',
                                            wait_time=0.02)
+        print("Using HIGH num cache")
         return mt_gen_train, mt_gen_val
 
     def get_plain_dataloaders(self, initial_patch_size: Tuple[int, ...], dim: int):
