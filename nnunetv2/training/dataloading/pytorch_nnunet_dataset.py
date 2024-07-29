@@ -39,8 +39,7 @@ class nnUNetPytorchDataset(Dataset):
                  oversample_foreground_percent: float = 0.0,
                  num_images_properties_loading_threshold: int = 2000,
                  folder_with_segs_from_previous_stage: str = None):
-        # Initialize 
-        super().__init__()
+        #Initialize    
 
         self.final_patch_size = final_patch_size
         self.patch_size = patch_size
@@ -49,22 +48,34 @@ class nnUNetPytorchDataset(Dataset):
         self.annotated_classes_key = tuple(label_manager.all_labels)
         self.oversample_foreground_percent = oversample_foreground_percent
         self.transform = transform
+        self.folder_with_segs_from_previous_stage = folder_with_segs_from_previous_stage
+        self.num_images_properties_loading_threshold = num_images_properties_loading_threshold
+        self.folder = folder
 
         if case_identifiers is None:
             case_identifiers = get_case_identifiers(folder)
         case_identifiers.sort()
+        self.case_identifiers = case_identifiers
 
+        self._setup_dataset_dict()
+
+    
+    def _setup_dataset_dict(self):
         self.dataset = {}
-        for c in case_identifiers:
+        for c in self.case_identifiers:
             self.dataset[c] = {}
-            self.dataset[c]['data_file'] = os.path.join(folder, f"{c}.npz")
-            self.dataset[c]['properties_file'] = os.path.join(folder, f"{c}.pkl")
-            if folder_with_segs_from_previous_stage is not None:
-                self.dataset[c]['seg_from_prev_stage_file'] = os.path.join(folder_with_segs_from_previous_stage, f"{c}.npz")
+            self.dataset[c]['data_file'] = os.path.join(self.folder, f"{c}.npz")
+            self.dataset[c]['properties_file'] = os.path.join(self.folder, f"{c}.pkl")
+            
+            # This line adds segmentations from previous stage - Relevant for cascase design
+            if self.folder_with_segs_from_previous_stage is not None:
+                self.dataset[c]['seg_from_prev_stage_file'] = os.path.join(self.folder_with_segs_from_previous_stage, f"{c}.npz")
 
-        if len(case_identifiers) <= num_images_properties_loading_threshold:
+        # This is a condition for whether we store all the properties in RAM or not
+        if len(self.case_identifiers) <= self.num_images_properties_loading_threshold:
             for i in self.dataset.keys():
-                self.dataset[i]['properties'] = load_pickle(self.dataset[i]['properties_file'])        
+                self.dataset[i]['properties'] = load_pickle(self.dataset[i]['properties_file'])
+
 
     def __len__(self):
         return self.dataset.__len__()

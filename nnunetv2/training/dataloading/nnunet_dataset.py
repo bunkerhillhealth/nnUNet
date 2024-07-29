@@ -10,8 +10,6 @@ from torch.utils.data import Dataset
 from nnunetv2.training.dataloading.utils import get_case_identifiers
 from nnunetv2.utilities.label_handling.label_handling import LabelManager
 
-import os
-
 
 class nnUNetDataset(object):
     def __init__(self, folder: str, case_identifiers: List[str] = None,

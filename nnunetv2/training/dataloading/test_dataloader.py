@@ -132,7 +132,7 @@ def run_dataloader_test_entry():
                         help="[OPTIONAL] If you set this flag the training cases will not be decompressed. Reading compressed "
                              "data is much more CPU and (potentially) RAM intensive and should only be used if you "
                              "know what you are doing")
-    parser.add_argument('-device', type=str, default='cuda', required=False,
+    parser.add_argument('--device', type=str, default='cuda', required=False,
                     help="Use this to set the device the training should run with. Available options are 'cuda' "
                          "(GPU), 'cpu' (CPU) and 'mps' (Apple M1/M2). Do NOT use this to set which GPU ID! "
                          "Use CUDA_VISIBLE_DEVICES=X nnUNetv2_train [...] instead!")
