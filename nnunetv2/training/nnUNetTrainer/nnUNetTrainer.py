@@ -1302,10 +1302,8 @@ class nnUNetTrainerPyTorchDataloader(nnUNetTrainer):
             val_sampler = DistributedSampler(val_dataset)
 
             # Instantiate the Pytorch dataloaders
-            # dl_tr = DataLoader(tr_dataset, batch_size=int(self.batch_size), shuffle=False, num_workers=allowed_num_processes, persistent_workers=True, pin_memory=True, prefetch_factor=200, sampler=tr_sampler)
-            # dl_val = DataLoader(val_dataset, batch_size=int(self.batch_size), shuffle=False, num_workers=allowed_num_processes, persistent_workers=True, pin_memory=True, prefetch_factor=50, sampler=val_sampler)
-            dl_tr = DataLoader(tr_dataset, batch_size=int(self.batch_size), shuffle=True, num_workers=allowed_num_processes, persistent_workers=True, pin_memory=True, prefetch_factor=200)
-            dl_val = DataLoader(val_dataset, batch_size=int(self.batch_size), shuffle=False, num_workers=allowed_num_processes, persistent_workers=True, pin_memory=True, prefetch_factor=50)            
+            dl_tr = DataLoader(tr_dataset, batch_size=int(self.batch_size), shuffle=False, num_workers=allowed_num_processes, persistent_workers=True, pin_memory=True, prefetch_factor=200, sampler=tr_sampler)
+            dl_val = DataLoader(val_dataset, batch_size=int(self.batch_size), shuffle=False, num_workers=allowed_num_processes, persistent_workers=True, pin_memory=True, prefetch_factor=50, sampler=val_sampler)          
         else:
             dl_tr = DataLoader(tr_dataset, batch_size=int(self.batch_size), shuffle=True, num_workers=allowed_num_processes, persistent_workers=True, pin_memory=True, prefetch_factor=200)
             dl_val = DataLoader(val_dataset, batch_size=int(self.batch_size), shuffle=False, num_workers=allowed_num_processes, persistent_workers=True, pin_memory=True, prefetch_factor=50)
