@@ -43,6 +43,8 @@ from nnunetv2.training.data_augmentation.custom_transforms.transforms_for_dummy_
 from nnunetv2.training.dataloading.data_loader_2d import nnUNetDataLoader2D
 from nnunetv2.training.dataloading.data_loader_3d import nnUNetDataLoader3D
 from nnunetv2.training.dataloading.nnunet_dataset import nnUNetDataset
+from nnunetv2.training.dataloading.pytorch_nnunet_dataset import nnUNetPytorchDataset
+
 from nnunetv2.training.dataloading.utils import get_case_identifiers, unpack_dataset
 from nnunetv2.training.logging.nnunet_logger import nnUNetLogger
 from nnunetv2.training.loss.compound_losses import DC_and_CE_loss, DC_and_BCE_loss
@@ -62,6 +64,9 @@ from torch import distributed as dist
 from torch.cuda import device_count
 from torch.cuda.amp import GradScaler
 from torch.nn.parallel import DistributedDataParallel as DDP
+from torch.utils.data import DataLoader
+
+from torch.utils.data.distributed import DistributedSampler
 
 
 class nnUNetTrainer(object):
@@ -1233,14 +1238,17 @@ class nnUNetTrainer(object):
 
     def run_training(self):
         self.on_train_start()
-
+        import time
         for epoch in range(self.current_epoch, self.num_epochs):
             self.on_epoch_start()
 
             self.on_train_epoch_start()
             train_outputs = []
             for batch_id in range(self.num_iterations_per_epoch):
+                time1 = time.time()
                 train_outputs.append(self.train_step(next(self.dataloader_train)))
+                time2 = time.time()
+                # print(f"Current batch_id: {batch_id} - Time: {time2 - time1}")
             self.on_train_epoch_end(train_outputs)
 
             with torch.no_grad():
@@ -1253,3 +1261,167 @@ class nnUNetTrainer(object):
             self.on_epoch_end()
 
         self.on_train_end()
+
+    def run_dataloading_test(self):
+        import time
+        self.on_train_start()
+        
+        # Set number of epochs and iterations to use for test
+        self.num_epochs = 5
+        self.num_iterations_per_epoch = 10
+
+        print(f"Running with just {self.num_epochs} epochs")        
+
+        for epoch in range(self.current_epoch, self.num_epochs):
+            self.on_epoch_start()
+
+            self.on_train_epoch_start()
+            train_outputs = []
+            for batch_id in range(self.num_iterations_per_epoch):
+                t1 = time.time()
+                train_batch = next(iter(self.dataloader_train))
+                t2 = time.time()
+                print(f"Current batch_id: {batch_id} - Time: {t2 - t1}")
+                del train_batch                    
+
+class nnUNetTrainerPyTorchDataloader(nnUNetTrainer):
+    def __init__(self, plans: dict, configuration: str, fold: int, dataset_json: dict, unpack_dataset: bool = True, device: torch.device = torch.device('cuda')):
+        super().__init__(plans, configuration, fold, dataset_json, unpack_dataset, device)    
+
+    # Re-write the get_dataloaders function to get PyTorch datasets
+    def get_dataloaders(self):
+
+        allowed_num_processes = get_allowed_n_proc_DA()
+
+        # Instantiate the PyTorch datasets
+        tr_dataset, val_dataset = self.get_tr_and_val_datasets()
+
+        if self.is_ddp:
+            # Distributed Sampler 
+            tr_sampler = DistributedSampler(tr_dataset)
+            val_sampler = DistributedSampler(val_dataset)
+
+            # Instantiate the Pytorch dataloaders
+            dl_tr = DataLoader(tr_dataset, batch_size=int(self.batch_size), shuffle=False, num_workers=allowed_num_processes, persistent_workers=True, pin_memory=True, prefetch_factor=200, sampler=tr_sampler)
+            dl_val = DataLoader(val_dataset, batch_size=int(self.batch_size), shuffle=False, num_workers=allowed_num_processes, persistent_workers=True, pin_memory=True, prefetch_factor=50, sampler=val_sampler)          
+        else:
+            dl_tr = DataLoader(tr_dataset, batch_size=int(self.batch_size), shuffle=True, num_workers=allowed_num_processes, persistent_workers=True, pin_memory=True, prefetch_factor=200)
+            dl_val = DataLoader(val_dataset, batch_size=int(self.batch_size), shuffle=False, num_workers=allowed_num_processes, persistent_workers=True, pin_memory=True, prefetch_factor=50)
+
+
+        return dl_tr, dl_val
+
+    def get_tr_and_val_datasets(self):
+        # create dataset split
+        tr_keys, val_keys = self.do_split()
+
+        # Get initial 
+        rotation_for_DA, do_dummy_2d_data_aug, initial_patch_size, mirror_axes = \
+            self.configure_rotation_dummyDA_mirroring_and_inital_patch_size()        
+        
+        patch_size = self.configuration_manager.patch_size
+        dim = len(patch_size)
+
+        # needed for deep supervision: how much do we need to downscale the segmentation targets for the different
+        # outputs?
+        deep_supervision_scales = self._get_deep_supervision_scales()        
+
+        # training pipeline
+        tr_transforms = self.get_training_transforms(
+            patch_size, rotation_for_DA, deep_supervision_scales, mirror_axes, do_dummy_2d_data_aug,
+            order_resampling_data=3, order_resampling_seg=1,
+            use_mask_for_norm=self.configuration_manager.use_mask_for_norm,
+            is_cascaded=self.is_cascaded, foreground_labels=self.label_manager.foreground_labels,
+            regions=self.label_manager.foreground_regions if self.label_manager.has_regions else None,
+            ignore_label=self.label_manager.ignore_label)
+
+        # validation pipeline
+        val_transforms = self.get_validation_transforms(deep_supervision_scales,
+                                                        is_cascaded=self.is_cascaded,
+                                                        foreground_labels=self.label_manager.foreground_labels,
+                                                        regions=self.label_manager.foreground_regions if
+                                                        self.label_manager.has_regions else None,
+                                                        ignore_label=self.label_manager.ignore_label)                    
+
+        # load the datasets for training and validation. 
+        dataset_tr = nnUNetPytorchDataset(self.preprocessed_dataset_folder, initial_patch_size, 
+                                          self.configuration_manager.patch_size, self.label_manager, tr_transforms, tr_keys,
+                                          oversample_foreground_percent=self.oversample_foreground_percent,
+                                   folder_with_segs_from_previous_stage=self.folder_with_segs_from_previous_stage,
+                                   num_images_properties_loading_threshold=0)
+        dataset_val = nnUNetPytorchDataset(self.preprocessed_dataset_folder, self.configuration_manager.patch_size, 
+                                           self.configuration_manager.patch_size, self.label_manager, val_transforms, val_keys,
+                                           oversample_foreground_percent=self.oversample_foreground_percent,
+                                    folder_with_segs_from_previous_stage=self.folder_with_segs_from_previous_stage,
+                                    num_images_properties_loading_threshold=0)
+        
+        return dataset_tr, dataset_val
+    
+    def run_training(self):
+        print("Running training with New Dataloader ! ")
+        self.on_train_start()
+        import time
+        for epoch in range(self.current_epoch, self.num_epochs):
+            self.on_epoch_start()
+
+            self.on_train_epoch_start()
+            train_outputs = []
+            iterator = iter(self.dataloader_train)
+            for batch_id in range(self.num_iterations_per_epoch):
+                time1 = time.time()
+                try:
+                    train_batch_tuple = next(iterator)
+                except StopIteration:
+                    iterator = iter(self.dataloader_train)
+                    train_batch_tuple = next(iterator)                                    
+                train_batch = {"data": train_batch_tuple[0], "target": train_batch_tuple[1]}
+                train_outputs.append(self.train_step(train_batch))
+                time2 = time.time()
+                # print(f"Current batch_id: {batch_id} - Time: {time2 - time1}")
+            self.on_train_epoch_end(train_outputs)
+
+            with torch.no_grad():
+                self.on_validation_epoch_start()
+                val_outputs = []
+                iterator = iter(self.dataloader_val)       
+                for batch_id in range(self.num_val_iterations_per_epoch):
+                    # print(f"Current batch_id: {batch_id} - Time: {time.time()}")
+                    try:
+                        val_batch_tuple = next(iterator)
+                    except StopIteration:
+                        iterator = iter(self.dataloader_val)
+                        val_batch_tuple = next(iterator)
+                    val_batch = {"data": val_batch_tuple[0], "target": val_batch_tuple[1]}
+                    val_outputs.append(self.validation_step(val_batch))
+                self.on_validation_epoch_end(val_outputs)
+
+            self.on_epoch_end()
+
+        self.on_train_end()
+
+    def run_dataloading_test(self):
+        self.on_train_start()
+        import time
+        # Set number of epochs and iterations to use for test
+        self.num_epochs = 5
+        self.num_iterations_per_epoch = 10
+
+        print(f"Running with just {self.num_epochs} epochs")        
+
+        for epoch in range(self.current_epoch, self.num_epochs):
+            self.on_epoch_start()
+
+            self.on_train_epoch_start()
+            train_outputs = []
+            iterator = iter(self.dataloader_train)
+            for batch_id in range(self.num_iterations_per_epoch):
+                t1 = time.time()
+                try:
+                    train_batch = next(iterator)
+                except StopIteration:
+                    iterator = iter(self.dataloader_train)
+                    train_batch = next(iterator)
+                t2 = time.time()
+                print(f"Current batch_id: {batch_id} - Time: {t2 - t1}")
+                # Wait for 291629.4ms - To simulate train step                
+                del train_batch      
