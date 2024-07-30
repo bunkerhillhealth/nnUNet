@@ -1248,7 +1248,7 @@ class nnUNetTrainer(object):
                 time1 = time.time()
                 train_outputs.append(self.train_step(next(self.dataloader_train)))
                 time2 = time.time()
-                print(f"Current batch_id: {batch_id} - Time: {time2 - time1}")
+                # print(f"Current batch_id: {batch_id} - Time: {time2 - time1}")
             self.on_train_epoch_end(train_outputs)
 
             with torch.no_grad():
@@ -1377,7 +1377,7 @@ class nnUNetTrainerPyTorchDataloader(nnUNetTrainer):
                 train_batch = {"data": train_batch_tuple[0], "target": train_batch_tuple[1]}
                 train_outputs.append(self.train_step(train_batch))
                 time2 = time.time()
-                print(f"Current batch_id: {batch_id} - Time: {time2 - time1}")
+                # print(f"Current batch_id: {batch_id} - Time: {time2 - time1}")
             self.on_train_epoch_end(train_outputs)
 
             with torch.no_grad():
@@ -1385,7 +1385,7 @@ class nnUNetTrainerPyTorchDataloader(nnUNetTrainer):
                 val_outputs = []
                 iterator = iter(self.dataloader_val)       
                 for batch_id in range(self.num_val_iterations_per_epoch):
-                    print(f"Current batch_id: {batch_id} - Time: {time.time()}")
+                    # print(f"Current batch_id: {batch_id} - Time: {time.time()}")
                     try:
                         val_batch_tuple = next(iterator)
                     except StopIteration:
