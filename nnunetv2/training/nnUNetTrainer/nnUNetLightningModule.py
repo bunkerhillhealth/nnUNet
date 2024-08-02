@@ -88,6 +88,9 @@ class nnUNetLightningModule(pl.LightningModule):
         self.dataset_json = dataset_json
         self.fold = fold
         self.unpack_dataset = unpack_dataset
+        
+        # Variable to keep track of whether setup has been done
+        self.setup_complete = False 
 
         ### Setting all the folder names. We need to make sure things don't crash in case we are just running
         # inference and some of the folders may not be defined!
@@ -176,6 +179,42 @@ class nnUNetLightningModule(pl.LightningModule):
                                "#######################################################################\n",
                                also_print_to_console=True, add_timestamp=False)
 
+    
+    # TODO: Lighting has an inbuilt load checkpoint functionality
+    # We should switch to that
+    def load_checkpoint(self, filename_or_checkpoint: Union[dict, str]) -> None:
+        if not self.setup_complete:
+            self.setup('fit')            
+        if isinstance(filename_or_checkpoint, str):
+            checkpoint = torch.load(filename_or_checkpoint, map_location=self.device)
+        # if state dict comes from nn.DataParallel but we use non-parallel model here then the state dict keys do not
+        # match. Use heuristic to make it match
+        new_state_dict = {}
+        for k, value in checkpoint['network_weights'].items():
+            key = k
+            if key not in self.model.state_dict().keys() and key.startswith('module.'):
+                key = key[7:]
+            new_state_dict[key] = value
+
+        self.my_init_kwargs = checkpoint['init_args']
+        self.current_epoch = checkpoint['current_epoch']
+        self.logger.load_checkpoint(checkpoint['logging'])
+        self._best_ema = checkpoint['_best_ema']
+        self.inference_allowed_mirroring_axes = checkpoint[
+            'inference_allowed_mirroring_axes'] if 'inference_allowed_mirroring_axes' in checkpoint.keys() else self.inference_allowed_mirroring_axes
+
+        # messing with state dict naming schemes. Facepalm.
+        if isinstance(self.model, OptimizedModule):
+            self.model._orig_mod.load_state_dict(new_state_dict)
+        else:
+            self.model.load_state_dict(new_state_dict)
+
+        self.optimizer.load_state_dict(checkpoint['optimizer_state'])
+
+        # Not sure about this part - 
+        if self.grad_scaler is not None:
+            if checkpoint['grad_scaler_state'] is not None:
+                self.grad_scaler.load_state_dict(checkpoint['grad_scaler_state'])
 
     def prepare_data(self):
         """
@@ -200,20 +239,23 @@ class nnUNetLightningModule(pl.LightningModule):
 
         self._save_debug_information()            
     
+    def set_model(self):
+
+        self.num_input_channels = determine_num_input_channels(self.plans_manager, self.configuration_manager,
+                                                                self.dataset_json)        
+        
+        self.model = self.build_network_architecture(self.plans_manager, self.dataset_json, self.configuration_manager,
+                                                     self.num_input_channels, enable_deep_supervision=True).to(self.device)
+        
+        # compile network for free speedup
+        if self._do_i_compile():
+            self.print_to_log_file('Compiling network...')
+            self.model = torch.compile(self.model)
 
     def setup(self, stage: str):
-        if stage == 'fit' or stage is None:
-            self.num_input_channels = determine_num_input_channels(self.plans_manager, self.configuration_manager,
-                                                                   self.dataset_json)
-
-            self.model = self.build_network_architecture(self.plans_manager, self.dataset_json,
-                                                           self.configuration_manager,
-                                                           self.num_input_channels,
-                                                           enable_deep_supervision=True).to(self.device)
-            # compile network for free speedup
-            if self._do_i_compile():
-                self.print_to_log_file('Compiling network...')
-                self.model = torch.compile(self.model)
+        if (stage == 'fit' or stage is None) and not self.setup_complete:
+            if self.model is None:
+                self.set_model()                                        
 
             self.loss = self._build_loss()
             self.was_initialized = True
@@ -225,6 +267,8 @@ class nnUNetLightningModule(pl.LightningModule):
 
             self.print_plans()
             empty_cache(self.device)
+
+            self.setup_complete = True
 
     def _build_loss(self):
         if self.label_manager.has_regions:
@@ -660,16 +704,3 @@ class nnUNetLightningModule(pl.LightningModule):
         
         empty_cache(self.device)
         self.print_to_log_file("Training done.")
-
-
-
-
-
-    
-
-
-
-        
-
-
-

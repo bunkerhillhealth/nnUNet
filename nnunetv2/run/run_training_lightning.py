@@ -17,6 +17,7 @@ from nnunetv2.training.nnUNetTrainer.nnUNetLightningModule import nnUNetLightnin
 from nnunetv2.training.nnUNetTrainer.nnUNetTrainer import nnUNetTrainer
 from nnunetv2.utilities.dataset_name_id_conversion import maybe_convert_to_dataset_name
 from nnunetv2.utilities.find_class_by_name import recursive_find_python_class
+import pytorch_lightning as pl
 
 
 def find_free_network_port() -> int:
@@ -40,24 +41,7 @@ def get_lightning_module_from_args(
     plans_identifier: str = "nnUNetPlans",
     use_compressed: bool = False,
     device: torch.device = torch.device("cuda"),
-):
-    # load nnunet class and do sanity checks
-    # nnunet_trainer = recursive_find_python_class(
-    #     join(nnunetv2.__path__[0], "training", "nnUNetTrainer"),
-    #     trainer_name,
-    #     "nnunetv2.training.nnUNetTrainer",
-    # )
-
-    # if nnunet_trainer is None:
-    #     raise RuntimeError(
-    #         f"Could not find requested nnunet trainer {trainer_name} in "
-    #         f"nnunetv2.training.nnUNetTrainer ("
-    #         f'{join(nnunetv2.__path__[0], "training", "nnUNetTrainer")}). If it is located somewhere '
-    #         f"else, please move it there."
-    #     )
-    # assert issubclass(nnunet_trainer, nnUNetTrainer), (
-    #     "The requested nnunet trainer class must inherit from " "nnUNetTrainer"
-    # )
+): 
 
     # handle dataset input. If it's an ID we need to convert to int from string
     if dataset_name_or_id.startswith("Dataset"):
@@ -91,8 +75,8 @@ def get_lightning_module_from_args(
     return nnunet_module
 
 
-def maybe_load_checkpoint(
-    nnunet_trainer: nnUNetTrainer,
+def maybe_load_checkpoint_lightning(
+    nnunet_module: pl.LightningModule,
     continue_training: bool,
     validation_only: bool,
     pretrained_weights_file: str = None,
@@ -104,16 +88,16 @@ def maybe_load_checkpoint(
         )
     if continue_training:
         expected_checkpoint_file = join(
-            nnunet_trainer.output_folder, "checkpoint_final.pth"
+            nnunet_module.output_folder, "checkpoint_final.pth"
         )
         if not isfile(expected_checkpoint_file):
             expected_checkpoint_file = join(
-                nnunet_trainer.output_folder, "checkpoint_latest.pth"
+                nnunet_module.output_folder, "checkpoint_latest.pth"
             )
         # special case where --c is used to run a previously aborted validation
         if not isfile(expected_checkpoint_file):
             expected_checkpoint_file = join(
-                nnunet_trainer.output_folder, "checkpoint_best.pth"
+                nnunet_module.output_folder, "checkpoint_best.pth"
             )
         if not isfile(expected_checkpoint_file):
             print(
@@ -123,7 +107,7 @@ def maybe_load_checkpoint(
             expected_checkpoint_file = None
     elif validation_only:
         expected_checkpoint_file = join(
-            nnunet_trainer.output_folder, "checkpoint_final.pth"
+            nnunet_module.output_folder, "checkpoint_final.pth"
         )
         if not isfile(expected_checkpoint_file):
             raise RuntimeError(
@@ -131,52 +115,15 @@ def maybe_load_checkpoint(
             )
     else:
         if pretrained_weights_file is not None:
-            if not nnunet_trainer.was_initialized:
-                nnunet_trainer.initialize()
+            if not nnunet_module.setup_done:
+                nnunet_module.setup()
             load_pretrained_weights(
-                nnunet_trainer.network, pretrained_weights_file, verbose=True
+                nnunet_module.model, pretrained_weights_file, verbose=True
             )
         expected_checkpoint_file = None
 
     if expected_checkpoint_file is not None:
-        nnunet_trainer.load_checkpoint(expected_checkpoint_file)
-
-
-# def setup_ddp(rank, world_size):
-#     # initialize the process group
-#     dist.init_process_group("nccl", rank=rank, world_size=world_size)
-
-
-# def cleanup_ddp():
-#     dist.destroy_process_group()
-
-
-# def run_ddp(rank, dataset_name_or_id, configuration, fold, tr, p, use_compressed, disable_checkpointing, c, val,
-#             pretrained_weights, npz, val_with_best, world_size):
-#     setup_ddp(rank, world_size)
-#     torch.cuda.set_device(torch.device('cuda', dist.get_rank()))
-
-#     nnunet_trainer = get_trainer_from_args(dataset_name_or_id, configuration, fold, tr, p,
-#                                            use_compressed)
-
-#     if disable_checkpointing:
-#         nnunet_trainer.disable_checkpointing = disable_checkpointing
-
-#     assert not (c and val), f'Cannot set --c and --val flag at the same time. Dummy.'
-
-#     maybe_load_checkpoint(nnunet_trainer, c, val, pretrained_weights)
-
-#     if torch.cuda.is_available():
-#         cudnn.deterministic = False
-#         cudnn.benchmark = True
-
-#     if not val:
-#         nnunet_trainer.run_training()
-
-#     if val_with_best:
-#         nnunet_trainer.load_checkpoint(join(nnunet_trainer.output_folder, 'checkpoint_best.pth'))
-#     nnunet_trainer.perform_actual_validation(npz)
-#     cleanup_ddp()
+        nnunet_module.load_checkpoint(expected_checkpoint_file)
 
 
 def run_training(
@@ -215,8 +162,17 @@ def run_training(
                                                 plans_identifier, use_compressed_data, device=device)
 
     # Load the checkpoint if needed
-
+    maybe_load_checkpoint_lightning(nnunet_module, continue_training, only_run_validation, pretrained_weights)
+    
     # Run the fit command
+    if num_gpus < 2:
+        trainer = pl.Trainer(max_epochs=1000, gpus=num_gpus, precision=16, gradient_clip_val=12.0)
+
+    else:
+        trainer = pl.Trainer(max_epochs=1000, gpus=num_gpus, precision=16, gradient_clip_val=12.0, distributed_backend='ddp')
+
+    trainer.fit(nnunet_module)
+    
 
     
 
