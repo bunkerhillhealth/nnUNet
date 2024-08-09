@@ -17,7 +17,6 @@ from nnunetv2.training.nnUNetTrainer.nnUNetLightningModule import nnUNetLightnin
 from nnunetv2.training.nnUNetTrainer.nnUNetTrainer import nnUNetTrainer
 from nnunetv2.utilities.dataset_name_id_conversion import maybe_convert_to_dataset_name
 from nnunetv2.utilities.find_class_by_name import recursive_find_python_class
-import pytorch_lightning as pl
 
 
 def find_free_network_port() -> int:
@@ -41,7 +40,7 @@ def get_lightning_module_from_args(
     plans_identifier: str = "nnUNetPlans",
     use_compressed: bool = False,
     device: torch.device = torch.device("cuda"),
-): 
+):
 
     # handle dataset input. If it's an ID we need to convert to int from string
     if dataset_name_or_id.startswith("Dataset"):
@@ -63,7 +62,7 @@ def get_lightning_module_from_args(
     plans_file = join(preprocessed_dataset_folder_base, plans_identifier + ".json")
     plans = load_json(plans_file)
     dataset_json = load_json(join(preprocessed_dataset_folder_base, "dataset.json"))
-    
+
     nnunet_module = nnUNetLightningModule(
         plans=plans,
         configuration=configuration,
@@ -158,73 +157,37 @@ def run_training(
         ), "--val_best is not compatible with --disable_checkpointing"
 
     # Instantiate the appropriate Lightning Module from the Arguments
-    nnunet_module = get_lightning_module_from_args(dataset_name_or_id, configuration, fold, trainer_class_name,
-                                                plans_identifier, use_compressed_data, device=device)
+    nnunet_module = get_lightning_module_from_args(
+        dataset_name_or_id,
+        configuration,
+        fold,
+        trainer_class_name,
+        plans_identifier,
+        use_compressed_data,
+        device=device,
+    )
 
     # Load the checkpoint if needed
-    maybe_load_checkpoint_lightning(nnunet_module, continue_training, only_run_validation, pretrained_weights)
-    
+    maybe_load_checkpoint_lightning(
+        nnunet_module, continue_training, only_run_validation, pretrained_weights
+    )
+
     # Run the fit command
     if num_gpus < 2:
-        trainer = pl.Trainer(max_epochs=1000, gpus=num_gpus, precision=16, gradient_clip_val=12.0)
+        trainer = pl.Trainer(
+            max_epochs=1000, devices=num_gpus, precision=16, gradient_clip_val=12.0
+        )
 
     else:
-        trainer = pl.Trainer(max_epochs=1000, gpus=num_gpus, precision=16, gradient_clip_val=12.0, distributed_backend='ddp')
+        trainer = pl.Trainer(
+            max_epochs=1000,
+            devices=num_gpus,
+            precision=16,
+            gradient_clip_val=12.0,
+            distributed_backend="ddp",
+        )
 
     trainer.fit(nnunet_module)
-    
-
-    
-
-
-
-    # if num_gpus > 1:
-    #     assert device.type == 'cuda', f"DDP training (triggered by num_gpus > 1) is only implemented for cuda devices. Your device: {device}"
-
-    #     os.environ['MASTER_ADDR'] = 'localhost'
-    #     if 'MASTER_PORT' not in os.environ.keys():
-    #         port = str(find_free_network_port())
-    #         print(f"using port {port}")
-    #         os.environ['MASTER_PORT'] = port  # str(port)
-
-    #     mp.spawn(run_ddp,
-    #              args=(
-    #                  dataset_name_or_id,
-    #                  configuration,
-    #                  fold,
-    #                  trainer_class_name,
-    #                  plans_identifier,
-    #                  use_compressed_data,
-    #                  disable_checkpointing,
-    #                  continue_training,
-    #                  only_run_validation,
-    #                  pretrained_weights,
-    #                  export_validation_probabilities,
-    #                  val_with_best,
-    #                  num_gpus),
-    #              nprocs=num_gpus,
-    #              join=True)
-    # else:
-    #     nnunet_trainer = get_trainer_from_args(dataset_name_or_id, configuration, fold, trainer_class_name,
-    #                                            plans_identifier, use_compressed_data, device=device)
-
-    #     if disable_checkpointing:
-    #         nnunet_trainer.disable_checkpointing = disable_checkpointing
-
-    #     assert not (continue_training and only_run_validation), f'Cannot set --c and --val flag at the same time. Dummy.'
-
-    #     maybe_load_checkpoint(nnunet_trainer, continue_training, only_run_validation, pretrained_weights)
-
-    #     if torch.cuda.is_available():
-    #         cudnn.deterministic = False
-    #         cudnn.benchmark = True
-
-    #     if not only_run_validation:
-    #         nnunet_trainer.run_training()
-
-    #     if val_with_best:
-    #         nnunet_trainer.load_checkpoint(join(nnunet_trainer.output_folder, 'checkpoint_best.pth'))
-    #     nnunet_trainer.perform_actual_validation(export_validation_probabilities)
 
 
 def run_training_entry():

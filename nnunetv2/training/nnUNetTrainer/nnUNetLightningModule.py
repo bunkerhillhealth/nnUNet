@@ -6,68 +6,85 @@ import sys
 import warnings
 from copy import deepcopy
 from datetime import datetime
-from time import time, sleep
-from typing import Union, Tuple, List
+from time import sleep, time
+from typing import List, Tuple, Union
 
 import numpy as np
+import pytorch_lightning as pl
 import torch
-from batchgenerators.dataloading.single_threaded_augmenter import SingleThreadedAugmenter
-from batchgenerators.transforms.abstract_transforms import AbstractTransform, Compose
-from batchgenerators.transforms.color_transforms import BrightnessMultiplicativeTransform, \
-    ContrastAugmentationTransform, GammaTransform
-from batchgenerators.transforms.noise_transforms import GaussianNoiseTransform, GaussianBlurTransform
-from batchgenerators.transforms.resample_transforms import SimulateLowResolutionTransform
-from batchgenerators.transforms.spatial_transforms import SpatialTransform, MirrorTransform
-from batchgenerators.transforms.utility_transforms import RemoveLabelTransform, RenameTransform, NumpyToTensor
-from batchgenerators.utilities.file_and_folder_operations import join, load_json, isfile, save_json, maybe_mkdir_p
+from batchgenerators.dataloading.single_threaded_augmenter import \
+    SingleThreadedAugmenter
+from batchgenerators.transforms.abstract_transforms import (AbstractTransform,
+                                                            Compose)
+from batchgenerators.transforms.color_transforms import (
+    BrightnessMultiplicativeTransform, ContrastAugmentationTransform,
+    GammaTransform)
+from batchgenerators.transforms.noise_transforms import (
+    GaussianBlurTransform, GaussianNoiseTransform)
+from batchgenerators.transforms.resample_transforms import \
+    SimulateLowResolutionTransform
+from batchgenerators.transforms.spatial_transforms import (MirrorTransform,
+                                                           SpatialTransform)
+from batchgenerators.transforms.utility_transforms import (
+    NumpyToTensor, RemoveLabelTransform, RenameTransform)
+from batchgenerators.utilities.file_and_folder_operations import (
+    isfile, join, load_json, maybe_mkdir_p, save_json)
+from sklearn.model_selection import KFold
+from torch import autocast
+from torch import distributed as dist
+from torch import nn
 from torch._dynamo import OptimizedModule
+from torch.cuda import device_count
+from torch.cuda.amp import GradScaler
+from torch.nn.parallel import DistributedDataParallel as DDP
+from torch.utils.data import DataLoader
+from torch.utils.data.distributed import DistributedSampler
 
 from nnunetv2.configuration import ANISO_THRESHOLD, default_num_processes
 from nnunetv2.evaluation.evaluate_predictions import compute_metrics_on_folder
-from nnunetv2.inference.export_prediction import export_prediction_from_logits, resample_and_save
+from nnunetv2.inference.export_prediction import (
+    export_prediction_from_logits, resample_and_save)
 from nnunetv2.inference.predict_from_raw_data import nnUNetPredictor
 from nnunetv2.inference.sliding_window_prediction import compute_gaussian
 from nnunetv2.paths import nnUNet_preprocessed, nnUNet_results
-from nnunetv2.training.data_augmentation.compute_initial_patch_size import get_patch_size
-from nnunetv2.training.data_augmentation.custom_transforms.cascade_transforms import MoveSegAsOneHotToData, \
-    ApplyRandomBinaryOperatorTransform, RemoveRandomConnectedComponentFromOneHotEncodingTransform
+from nnunetv2.training.data_augmentation.compute_initial_patch_size import \
+    get_patch_size
+from nnunetv2.training.data_augmentation.custom_transforms.cascade_transforms import (
+    ApplyRandomBinaryOperatorTransform, MoveSegAsOneHotToData,
+    RemoveRandomConnectedComponentFromOneHotEncodingTransform)
 from nnunetv2.training.data_augmentation.custom_transforms.deep_supervision_donwsampling import \
     DownsampleSegForDSTransform2
 from nnunetv2.training.data_augmentation.custom_transforms.limited_length_multithreaded_augmenter import \
     LimitedLenWrapper
-from nnunetv2.training.data_augmentation.custom_transforms.masking import MaskTransform
+from nnunetv2.training.data_augmentation.custom_transforms.masking import \
+    MaskTransform
 from nnunetv2.training.data_augmentation.custom_transforms.region_based_training import \
     ConvertSegmentationToRegionsTransform
-from nnunetv2.training.data_augmentation.custom_transforms.transforms_for_dummy_2d import Convert2DTo3DTransform, \
-    Convert3DTo2DTransform
+from nnunetv2.training.data_augmentation.custom_transforms.transforms_for_dummy_2d import (
+    Convert2DTo3DTransform, Convert3DTo2DTransform)
 from nnunetv2.training.dataloading.data_loader_2d import nnUNetDataLoader2D
 from nnunetv2.training.dataloading.data_loader_3d import nnUNetDataLoader3D
 from nnunetv2.training.dataloading.nnunet_dataset import nnUNetDataset
-from nnunetv2.training.dataloading.pytorch_nnunet_dataset import nnUNetPytorchDataset
-
-from nnunetv2.training.dataloading.utils import get_case_identifiers, unpack_dataset
+from nnunetv2.training.dataloading.pytorch_nnunet_dataset import \
+    nnUNetPytorchDataset
+from nnunetv2.training.dataloading.utils import (get_case_identifiers,
+                                                 unpack_dataset)
 from nnunetv2.training.logging.nnunet_logger import nnUNetLogger
-from nnunetv2.training.loss.compound_losses import DC_and_CE_loss, DC_and_BCE_loss
+from nnunetv2.training.loss.compound_losses import (DC_and_BCE_loss,
+                                                    DC_and_CE_loss)
 from nnunetv2.training.loss.deep_supervision import DeepSupervisionWrapper
-from nnunetv2.training.loss.dice import get_tp_fp_fn_tn, MemoryEfficientSoftDiceLoss
+from nnunetv2.training.loss.dice import (MemoryEfficientSoftDiceLoss,
+                                         get_tp_fp_fn_tn)
 from nnunetv2.training.lr_scheduler.polylr import PolyLRScheduler
 from nnunetv2.utilities.collate_outputs import collate_outputs
 from nnunetv2.utilities.default_n_proc_DA import get_allowed_n_proc_DA
 from nnunetv2.utilities.file_path_utilities import check_workers_alive_and_busy
 from nnunetv2.utilities.get_network_from_plans import get_network_from_plans
-from nnunetv2.utilities.helpers import empty_cache, dummy_context
-from nnunetv2.utilities.label_handling.label_handling import convert_labelmap_to_one_hot, determine_num_input_channels
-from nnunetv2.utilities.plans_handling.plans_handler import PlansManager, ConfigurationManager
-from sklearn.model_selection import KFold
-from torch import autocast, nn
-from torch import distributed as dist
-from torch.cuda import device_count
-from torch.cuda.amp import GradScaler
-from torch.nn.parallel import DistributedDataParallel as DDP
-from torch.utils.data import DataLoader
-
-from torch.utils.data.distributed import DistributedSampler
-import pytorch_lightning as pl
+from nnunetv2.utilities.helpers import dummy_context, empty_cache
+from nnunetv2.utilities.label_handling.label_handling import (
+    convert_labelmap_to_one_hot, determine_num_input_channels)
+from nnunetv2.utilities.plans_handling.plans_handler import (
+    ConfigurationManager, PlansManager)
 
 
 class nnUNetLightningModule(pl.LightningModule):
@@ -127,7 +144,7 @@ class nnUNetLightningModule(pl.LightningModule):
         self.num_iterations_per_epoch = 250
         self.num_val_iterations_per_epoch = 50
         self.num_epochs = 1000
-        self.current_epoch = 0
+        self.manual_current_epoch = 0
 
         ### Dealing with labels/regions
         self.label_manager = self.plans_manager.get_label_manager(dataset_json)
@@ -137,7 +154,7 @@ class nnUNetLightningModule(pl.LightningModule):
         self.num_input_channels = None  # -> self.initialize()
         self.model = None  # -> self._get_network()
         self.optimizer = self.lr_scheduler = None  # -> self.initialize
-        self.grad_scaler = GradScaler() if self.device.type == 'cuda' else None
+        # self.grad_scaler = GradScaler() if self.device.type == 'cuda' else None
         self.loss = None  # -> self.initialize        
 
         ### Simple logging. Don't take that away from me!
@@ -149,7 +166,7 @@ class nnUNetLightningModule(pl.LightningModule):
         self.log_file = join(self.output_folder, "training_log_%d_%d_%d_%02.0d_%02.0d_%02.0d.txt" %
                              (timestamp.year, timestamp.month, timestamp.day, timestamp.hour, timestamp.minute,
                               timestamp.second))
-        self.logger = nnUNetLogger()
+        self.nnUNet_logger = nnUNetLogger()
 
         ### initializing stuff for remembering things and such
         self._best_ema = None
@@ -169,15 +186,33 @@ class nnUNetLightningModule(pl.LightningModule):
         self.batch_size = self.configuration_manager.batch_size
 
         self.was_initialized = False
+        
+    def print_to_log_file(self, *args, also_print_to_console=True, add_timestamp=True):        
+        timestamp = time()
+        dt_object = datetime.fromtimestamp(timestamp)
 
-        self.print_to_log_file("\n#######################################################################\n"
-                               "Please cite the following paper when using nnU-Net:\n"
-                               "Isensee, F., Jaeger, P. F., Kohl, S. A., Petersen, J., & Maier-Hein, K. H. (2021). "
-                               "nnU-Net: a self-configuring method for deep learning-based biomedical image segmentation. "
-                               "Nature methods, 18(2), 203-211.\n"
-                               "Now in Lightning flavor! \n"
-                               "#######################################################################\n",
-                               also_print_to_console=True, add_timestamp=False)
+        if add_timestamp:
+            args = (f"{dt_object}:", *args)
+
+        successful = False
+        max_attempts = 5
+        ctr = 0
+        while not successful and ctr < max_attempts:
+            try:
+                with open(self.log_file, 'a+') as f:
+                    for a in args:
+                        f.write(str(a))
+                        f.write(" ")
+                    f.write("\n")
+                successful = True
+            except IOError:
+                print(f"{datetime.fromtimestamp(timestamp)}: failed to log: ", sys.exc_info())
+                sleep(0.5)
+                ctr += 1
+        if also_print_to_console:
+            print(*args)
+        elif also_print_to_console:
+            print(*args)        
 
     
     # TODO: Lighting has an inbuilt load checkpoint functionality
@@ -197,8 +232,8 @@ class nnUNetLightningModule(pl.LightningModule):
             new_state_dict[key] = value
 
         self.my_init_kwargs = checkpoint['init_args']
-        self.current_epoch = checkpoint['current_epoch']
-        self.logger.load_checkpoint(checkpoint['logging'])
+        self.manual_current_epoch = checkpoint['current_epoch']
+        self.nnUNet_logger.load_checkpoint(checkpoint['logging'])
         self._best_ema = checkpoint['_best_ema']
         self.inference_allowed_mirroring_axes = checkpoint[
             'inference_allowed_mirroring_axes'] if 'inference_allowed_mirroring_axes' in checkpoint.keys() else self.inference_allowed_mirroring_axes
@@ -211,16 +246,24 @@ class nnUNetLightningModule(pl.LightningModule):
 
         self.optimizer.load_state_dict(checkpoint['optimizer_state'])
 
-        # Not sure about this part - 
-        if self.grad_scaler is not None:
-            if checkpoint['grad_scaler_state'] is not None:
-                self.grad_scaler.load_state_dict(checkpoint['grad_scaler_state'])
+        # Not sure about this part - I think lightning handles this internally .. 
+        # if self.grad_scaler is not None:
+        #     if checkpoint['grad_scaler_state'] is not None:
+        #         self.grad_scaler.load_state_dict(checkpoint['grad_scaler_state'])
 
     def prepare_data(self):
         """
         This is where you can put the code that runs ONLY once before training starts. ie.
         it does not run n times for n GPUs.
         """
+        self.print_to_log_file("\n#######################################################################\n"
+                               "Please cite the following paper when using nnU-Net:\n"
+                               "Isensee, F., Jaeger, P. F., Kohl, S. A., Petersen, J., & Maier-Hein, K. H. (2021). "
+                               "nnU-Net: a self-configuring method for deep learning-based biomedical image segmentation. "
+                               "Nature methods, 18(2), 203-211.\n"
+                               "#######################################################################\n",
+                               also_print_to_console=True, add_timestamp=False)
+
         # maybe unpack - This converts preprocessed npz files to npy files. 
         # This is done to speed up the data loading
         if self.unpack_dataset and self.local_rank == 0:
@@ -536,11 +579,11 @@ class nnUNetLightningModule(pl.LightningModule):
 
     def on_train_epoch_start(self):        
         self.print_to_log_file('')
-        self.print_to_log_file(f'Epoch {self.current_epoch}')
+        self.print_to_log_file(f'Epoch {self.manual_current_epoch}')
         self.print_to_log_file(
             f"Current learning rate: {np.round(self.optimizer.param_groups[0]['lr'], decimals=5)}")
         # lrs are the same for all workers so we don't need to gather them in case of DDP training
-        self.logger.log('lrs', self.optimizer.param_groups[0]['lr'], self.current_epoch)
+        self.nnUNet_logger.log('lrs', self.optimizer.param_groups[0]['lr'], self.manual_current_epoch)
 
         self.train_outputs = []
 
@@ -572,32 +615,32 @@ class nnUNetLightningModule(pl.LightningModule):
         else:
             loss_here = np.mean(outputs['loss'])
 
-        self.logger.log('train_losses', loss_here, self.current_epoch)
+        self.nnUNet_logger.log('train_losses', loss_here, self.manual_current_epoch)
 
         # Also add on_epoch_end content here .. 
-        self.logger.log('epoch_end_timestamps', time(), self.current_epoch)
+        self.nnUNet_logger.log('epoch_end_timestamps', time(), self.manual_current_epoch)
 
         # todo find a solution for this stupid shit
-        self.print_to_log_file('train_loss', np.round(self.logger.my_fantastic_logging['train_losses'][-1], decimals=4))
-        self.print_to_log_file('val_loss', np.round(self.logger.my_fantastic_logging['val_losses'][-1], decimals=4))
+        self.print_to_log_file('train_loss', np.round(self.nnUNet_logger.my_fantastic_logging['train_losses'][-1], decimals=4))
+        self.print_to_log_file('val_loss', np.round(self.nnUNet_logger.my_fantastic_logging['val_losses'][-1], decimals=4))
         self.print_to_log_file('Pseudo dice', [np.round(i, decimals=4) for i in
-                                               self.logger.my_fantastic_logging['dice_per_class_or_region'][-1]])
+                                               self.nnUNet_logger.my_fantastic_logging['dice_per_class_or_region'][-1]])
         self.print_to_log_file(
-            f"Epoch time: {np.round(self.logger.my_fantastic_logging['epoch_end_timestamps'][-1] - self.logger.my_fantastic_logging['epoch_start_timestamps'][-1], decimals=2)} s")
+            f"Epoch time: {np.round(self.nnUNet_logger.my_fantastic_logging['epoch_end_timestamps'][-1] - self.nnUNet_logger.my_fantastic_logging['epoch_start_timestamps'][-1], decimals=2)} s")
 
         # handling periodic checkpointing
-        current_epoch = self.current_epoch
+        current_epoch = self.manual_current_epoch
         if (current_epoch + 1) % self.save_every == 0 and current_epoch != (self.num_epochs - 1):
             self.save_checkpoint(join(self.output_folder, 'checkpoint_latest.pth'))
 
         # handle 'best' checkpointing. ema_fg_dice is computed by the logger and can be accessed like this
-        if self._best_ema is None or self.logger.my_fantastic_logging['ema_fg_dice'][-1] > self._best_ema:
-            self._best_ema = self.logger.my_fantastic_logging['ema_fg_dice'][-1]
+        if self._best_ema is None or self.nnUNet_logger.my_fantastic_logging['ema_fg_dice'][-1] > self._best_ema:
+            self._best_ema = self.nnUNet_logger.my_fantastic_logging['ema_fg_dice'][-1]
             self.print_to_log_file(f"Yayy! New best EMA pseudo Dice: {np.round(self._best_ema, decimals=4)}")
             self.save_checkpoint(join(self.output_folder, 'checkpoint_best.pth'))
 
         if self.local_rank == 0:
-            self.logger.plot_progress_png(self.output_folder)
+            self.nnUNet_logger.plot_progress_png(self.output_folder)
 
     
     def on_validation_epoch_start(self):
@@ -689,11 +732,11 @@ class nnUNetLightningModule(pl.LightningModule):
         global_dc_per_class = [i for i in [2 * i / (2 * i + j + k) for i, j, k in
                                            zip(tp, fp, fn)]]
         mean_fg_dice = np.nanmean(global_dc_per_class)
-        self.logger.log('mean_fg_dice', mean_fg_dice, self.current_epoch)
-        self.logger.log('dice_per_class_or_region', global_dc_per_class, self.current_epoch)
-        self.logger.log('val_losses', loss_here, self.current_epoch)
+        self.nnUNet_logger.log('mean_fg_dice', mean_fg_dice, self.manual_current_epoch)
+        self.nnUNet_logger.log('dice_per_class_or_region', global_dc_per_class, self.manual_current_epoch)
+        self.nnUNet_logger.log('val_losses', loss_here, self.manual_current_epoch)
     def on_epoch_start(self):
-        self.logger.log('epoch_start_timestamps', time(), self.current_epoch)
+        self.nnUNet_logger.log('epoch_start_timestamps', time(), self.manual_current_epoch)
 
     def on_train_end(self):
         self.save_checkpoint(join(self.output_folder, "checkpoint_final.pth"))
