@@ -904,14 +904,10 @@ class nnUNetLightningModule(pl.LightningModule):
         output = self.model(data)
 
         # TO use only highest resolution output
-        output = output[0]
-        target = target[0]
-
-        l = self.loss(output, target)
-
-        # we only need the output with the highest output resolution
         output = [output[0]]
         target = [target[0]]
+
+        l = self.loss(output, target)
 
         # the following is needed for online evaluation. Fake dice (green line)
         axes = [0] + list(range(2, output.ndim))
