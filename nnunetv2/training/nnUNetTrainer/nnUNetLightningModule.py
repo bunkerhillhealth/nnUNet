@@ -71,11 +71,12 @@ from nnunetv2.training.dataloading.utils import (get_case_identifiers,
                                                  unpack_dataset)
 from nnunetv2.training.logging.nnunet_logger import nnUNetLogger
 from nnunetv2.training.loss.compound_losses import (DC_and_BCE_loss,
-                                                    DC_and_CE_loss, 
-                                                    DC_and_BCE_loss_noDDP, 
+                                                    DC_and_BCE_loss_noDDP,
+                                                    DC_and_CE_loss,
                                                     DC_and_CE_loss_noDDP)
 from nnunetv2.training.loss.deep_supervision import DeepSupervisionWrapper
 from nnunetv2.training.loss.dice import (MemoryEfficientSoftDiceLoss,
+                                        MemoryEfficientSoftDiceLoss_noDDP,
                                          get_tp_fp_fn_tn)
 from nnunetv2.training.lr_scheduler.polylr import PolyLRScheduler
 from nnunetv2.utilities.collate_outputs import collate_outputs
@@ -235,7 +236,7 @@ class nnUNetLightningModule(pl.LightningModule):
         return deep_supervision_scales
 
     def _set_batch_size_and_oversample(self):
-        if not self.is_ddp:
+        if not self.trainer.strategy.strategy_name == 'ddp':
             # set batch size to what the plan says, leave oversample untouched
             self.batch_size = self.configuration_manager.batch_size
         else:
@@ -280,31 +281,6 @@ class nnUNetLightningModule(pl.LightningModule):
 
             self.batch_size = batch_sizes[my_rank]
             self.oversample_foreground_percent = oversample_percents[my_rank]
-
-    def _build_loss(self):
-        if self.label_manager.has_regions:
-            loss = DC_and_BCE_loss({},
-                                   {'batch_dice': self.configuration_manager.batch_dice,
-                                    'do_bg': True, 'smooth': 1e-5, 'ddp': self.is_ddp},
-                                   use_ignore_label=self.label_manager.ignore_label is not None,
-                                   dice_class=MemoryEfficientSoftDiceLoss)
-        else:
-            loss = DC_and_CE_loss({'batch_dice': self.configuration_manager.batch_dice,
-                                   'smooth': 1e-5, 'do_bg': False, 'ddp': self.is_ddp}, {}, weight_ce=1, weight_dice=1,
-                                  ignore_label=self.label_manager.ignore_label, dice_class=MemoryEfficientSoftDiceLoss)
-
-        deep_supervision_scales = self._get_deep_supervision_scales()
-
-        # we give each output a weight which decreases exponentially (division by 2) as the resolution decreases
-        # this gives higher resolution outputs more weight in the loss
-        weights = np.array([1 / (2 ** i) for i in range(len(deep_supervision_scales))])
-        weights[-1] = 0
-
-        # we don't use the lowest 2 outputs. Normalize weights so that they sum to 1
-        weights = weights / weights.sum()
-        # now wrap the loss
-        loss = DeepSupervisionWrapper(loss, weights)
-        return loss
 
     def configure_rotation_dummyDA_mirroring_and_inital_patch_size(self):
         """
@@ -507,11 +483,11 @@ class nnUNetLightningModule(pl.LightningModule):
                                    {'batch_dice': self.configuration_manager.batch_dice,
                                     'do_bg': True, 'smooth': 1e-5},
                                    use_ignore_label=self.label_manager.ignore_label is not None,
-                                   dice_class=MemoryEfficientSoftDiceLoss)
+                                   dice_class=MemoryEfficientSoftDiceLoss_noDDP)
         else:
             loss = DC_and_CE_loss_noDDP({'batch_dice': self.configuration_manager.batch_dice,
                                    'smooth': 1e-5, 'do_bg': False}, {}, weight_ce=1, weight_dice=1,
-                                  ignore_label=self.label_manager.ignore_label, dice_class=MemoryEfficientSoftDiceLoss)
+                                  ignore_label=self.label_manager.ignore_label, dice_class=MemoryEfficientSoftDiceLoss_noDDP)
 
         deep_supervision_scales = self._get_deep_supervision_scales()
 
@@ -859,7 +835,8 @@ class nnUNetLightningModule(pl.LightningModule):
         outputs = collate_outputs(self.train_outputs)
 
         # TO gather and log losses in the same way as nnUNet
-        if self.trainer.use_ddp or self.trainer.use_ddp2:
+        #TODO: Ideally we should not have to do this at all !!! even for logging ..... 
+        if self.trainer.strategy.strategy_name == 'ddp':
             # Use PyTorch Lightning's all_gather
             gathered_outputs = self.trainer.accelerator_backend.all_gather(outputs['loss'])
             losses_tr = gathered_outputs.cpu().numpy()
@@ -904,13 +881,13 @@ class nnUNetLightningModule(pl.LightningModule):
         output = self.model(data)
 
         # TO use only highest resolution output
-        output = [output[0]]
-        target = [target[0]]
+        output = output[0]
+        target = target[0]
 
-        l = self.loss(output, target)
+        l = self.loss([output], [target])
 
         # the following is needed for online evaluation. Fake dice (green line)
-        axes = [0] + list(range(2, output.ndim))
+        axes = [0] + list(range(2, output[0].ndim))
 
         if self.label_manager.has_regions:
             predicted_segmentation_onehot = (torch.sigmoid(output) > 0.5).long()
@@ -956,7 +933,8 @@ class nnUNetLightningModule(pl.LightningModule):
         fp = np.sum(outputs_collated['fp_hard'], 0)
         fn = np.sum(outputs_collated['fn_hard'], 0)
 
-        if self.trainer.use_ddp or self.trainer.use_ddp2:
+        #TODO: Ideally we should not have to do this at all !!! even for logging ..... 
+        if self.trainer.strategy.strategy_name == 'ddp':
             world_size = dist.get_world_size()
 
             tps = [None for _ in range(world_size)]
