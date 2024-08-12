@@ -813,7 +813,7 @@ class nnUNetLightningModule(pl.LightningModule):
     def train_dataloader(self):
         # Automatically uses DistributedSampler in DDP mode
         return DataLoader(
-            self.train_set, 
+            self.train_dataset, 
             batch_size=self.batch_size, 
             shuffle=False,  # Sampler handles shuffling
             num_workers=self.allowed_num_processes, 
@@ -824,7 +824,7 @@ class nnUNetLightningModule(pl.LightningModule):
     
     def val_dataloader(self):
         return DataLoader(
-            self.val_set, 
+            self.val_dataset, 
             batch_size=self.batch_size, 
             num_workers=self.allowed_num_processes, 
             pin_memory=True)        
@@ -910,8 +910,8 @@ class nnUNetLightningModule(pl.LightningModule):
         l = self.loss(output, target)
 
         # we only need the output with the highest output resolution
-        output = output[0]
-        target = target[0]
+        output = [output[0]]
+        target = [target[0]]
 
         # the following is needed for online evaluation. Fake dice (green line)
         axes = [0] + list(range(2, output.ndim))
