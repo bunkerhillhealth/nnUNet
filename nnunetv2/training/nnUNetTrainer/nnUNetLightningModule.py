@@ -94,6 +94,9 @@ class nnUNetLightningModule(pl.LightningModule):
         # loading and saving this class for continuing from checkpoint should not happen based on pickling. This
         # would also pickle the network etc. Bad, bad. Instead we just reinstantiate and then load the checkpoint we
         # need. So let's save the init args
+
+        super().__init__()
+
         self.my_init_kwargs = {}
         for k in inspect.signature(self.__init__).parameters.keys():
             self.my_init_kwargs[k] = locals()[k]
@@ -153,6 +156,7 @@ class nnUNetLightningModule(pl.LightningModule):
 
         self.num_input_channels = None  # -> self.initialize()
         self.model = None  # -> self._get_network()
+        self.model = None  
         self.optimizer = self.lr_scheduler = None  # -> self.initialize
         # self.grad_scaler = GradScaler() if self.device.type == 'cuda' else None
         self.loss = None  # -> self.initialize        
@@ -186,6 +190,176 @@ class nnUNetLightningModule(pl.LightningModule):
         self.batch_size = self.configuration_manager.batch_size
 
         self.was_initialized = False
+
+        self.configure_model()
+        
+    
+    def configure_model(self) -> None:
+        if self.model is None:
+            self.set_model()
+        ## SHOULD ADD A CALL TO PUT WEIGHTS HERE !!! -> THIS SHOULD HAVE SOMETHING TO DO WITH THE CHECPOINT AND PRE_TRAINED WEIGHTS uysage also
+        
+    @staticmethod
+    def build_network_architecture(plans_manager: PlansManager,
+                                   dataset_json,
+                                   configuration_manager: ConfigurationManager,
+                                   num_input_channels,
+                                   enable_deep_supervision: bool = True) -> nn.Module:
+        """
+        his is where you build the architecture according to the plans. There is no obligation to use
+        get_network_from_plans, this is just a utility we use for the nnU-Net default architectures. You can do what
+        you want. Even ignore the plans and just return something static (as long as it can process the requested
+        patch size)
+        but don't bug us with your bugs arising from fiddling with this :-P
+        This is the function that is called in inference as well! This is needed so that all network architecture
+        variants can be loaded at inference time (inference will use the same nnUNetTrainer that was used for
+        training, so if you change the network architecture during training by deriving a new trainer class then
+        inference will know about it).
+
+        If you need to know how many segmentation outputs your custom architecture needs to have, use the following snippet:
+        > label_manager = plans_manager.get_label_manager(dataset_json)
+        > label_manager.num_segmentation_heads
+        (why so complicated? -> We can have either classical training (classes) or regions. If we have regions,
+        the number of outputs is != the number of classes. Also there is the ignore label for which no output
+        should be generated. label_manager takes care of all that for you.)
+
+        """
+        return get_network_from_plans(plans_manager, dataset_json, configuration_manager,
+                                      num_input_channels, deep_supervision=enable_deep_supervision)
+
+    def _get_deep_supervision_scales(self):
+        deep_supervision_scales = list(list(i) for i in 1 / np.cumprod(np.vstack(
+            self.configuration_manager.pool_op_kernel_sizes), axis=0))[:-1]
+        return deep_supervision_scales
+
+    def _set_batch_size_and_oversample(self):
+        if not self.is_ddp:
+            # set batch size to what the plan says, leave oversample untouched
+            self.batch_size = self.configuration_manager.batch_size
+        else:
+            # batch size is distributed over DDP workers and we need to change oversample_percent for each worker
+            batch_sizes = []
+            oversample_percents = []
+
+            world_size = dist.get_world_size()
+            my_rank = dist.get_rank()
+
+            global_batch_size = self.configuration_manager.batch_size
+            assert global_batch_size >= world_size, 'Cannot run DDP if the batch size is smaller than the number of ' \
+                                                    'GPUs... Duh.'
+
+            batch_size_per_GPU = np.ceil(global_batch_size / world_size).astype(int)
+
+            for rank in range(world_size):
+                if (rank + 1) * batch_size_per_GPU > global_batch_size:
+                    batch_size = batch_size_per_GPU - ((rank + 1) * batch_size_per_GPU - global_batch_size)
+                else:
+                    batch_size = batch_size_per_GPU
+
+                batch_sizes.append(batch_size)
+
+                sample_id_low = 0 if len(batch_sizes) == 0 else np.sum(batch_sizes[:-1])
+                sample_id_high = np.sum(batch_sizes)
+
+                if sample_id_high / global_batch_size < (1 - self.oversample_foreground_percent):
+                    oversample_percents.append(0.0)
+                elif sample_id_low / global_batch_size > (1 - self.oversample_foreground_percent):
+                    oversample_percents.append(1.0)
+                else:
+                    percent_covered_by_this_rank = sample_id_high / global_batch_size - sample_id_low / global_batch_size
+                    oversample_percent_here = 1 - (((1 - self.oversample_foreground_percent) -
+                                                    sample_id_low / global_batch_size) / percent_covered_by_this_rank)
+                    oversample_percents.append(oversample_percent_here)
+
+            print("worker", my_rank, "oversample", oversample_percents[my_rank])
+            print("worker", my_rank, "batch_size", batch_sizes[my_rank])
+            # self.print_to_log_file("worker", my_rank, "oversample", oversample_percents[my_rank])
+            # self.print_to_log_file("worker", my_rank, "batch_size", batch_sizes[my_rank])
+
+            self.batch_size = batch_sizes[my_rank]
+            self.oversample_foreground_percent = oversample_percents[my_rank]
+
+    def _build_loss(self):
+        if self.label_manager.has_regions:
+            loss = DC_and_BCE_loss({},
+                                   {'batch_dice': self.configuration_manager.batch_dice,
+                                    'do_bg': True, 'smooth': 1e-5, 'ddp': self.is_ddp},
+                                   use_ignore_label=self.label_manager.ignore_label is not None,
+                                   dice_class=MemoryEfficientSoftDiceLoss)
+        else:
+            loss = DC_and_CE_loss({'batch_dice': self.configuration_manager.batch_dice,
+                                   'smooth': 1e-5, 'do_bg': False, 'ddp': self.is_ddp}, {}, weight_ce=1, weight_dice=1,
+                                  ignore_label=self.label_manager.ignore_label, dice_class=MemoryEfficientSoftDiceLoss)
+
+        deep_supervision_scales = self._get_deep_supervision_scales()
+
+        # we give each output a weight which decreases exponentially (division by 2) as the resolution decreases
+        # this gives higher resolution outputs more weight in the loss
+        weights = np.array([1 / (2 ** i) for i in range(len(deep_supervision_scales))])
+        weights[-1] = 0
+
+        # we don't use the lowest 2 outputs. Normalize weights so that they sum to 1
+        weights = weights / weights.sum()
+        # now wrap the loss
+        loss = DeepSupervisionWrapper(loss, weights)
+        return loss
+
+    def configure_rotation_dummyDA_mirroring_and_inital_patch_size(self):
+        """
+        This function is stupid and certainly one of the weakest spots of this implementation. Not entirely sure how we can fix it.
+        """
+        patch_size = self.configuration_manager.patch_size
+        dim = len(patch_size)
+        # todo rotation should be defined dynamically based on patch size (more isotropic patch sizes = more rotation)
+        if dim == 2:
+            do_dummy_2d_data_aug = False
+            # todo revisit this parametrization
+            if max(patch_size) / min(patch_size) > 1.5:
+                rotation_for_DA = {
+                    'x': (-15. / 360 * 2. * np.pi, 15. / 360 * 2. * np.pi),
+                    'y': (0, 0),
+                    'z': (0, 0)
+                }
+            else:
+                rotation_for_DA = {
+                    'x': (-180. / 360 * 2. * np.pi, 180. / 360 * 2. * np.pi),
+                    'y': (0, 0),
+                    'z': (0, 0)
+                }
+            mirror_axes = (0, 1)
+        elif dim == 3:
+            # todo this is not ideal. We could also have patch_size (64, 16, 128) in which case a full 180deg 2d rot would be bad
+            # order of the axes is determined by spacing, not image size
+            do_dummy_2d_data_aug = (max(patch_size) / patch_size[0]) > ANISO_THRESHOLD
+            if do_dummy_2d_data_aug:
+                # why do we rotate 180 deg here all the time? We should also restrict it
+                rotation_for_DA = {
+                    'x': (-180. / 360 * 2. * np.pi, 180. / 360 * 2. * np.pi),
+                    'y': (0, 0),
+                    'z': (0, 0)
+                }
+            else:
+                rotation_for_DA = {
+                    'x': (-30. / 360 * 2. * np.pi, 30. / 360 * 2. * np.pi),
+                    'y': (-30. / 360 * 2. * np.pi, 30. / 360 * 2. * np.pi),
+                    'z': (-30. / 360 * 2. * np.pi, 30. / 360 * 2. * np.pi),
+                }
+            mirror_axes = (0, 1, 2)
+        else:
+            raise RuntimeError()
+
+        # todo this function is stupid. It doesn't even use the correct scale range (we keep things as they were in the
+        #  old nnunet for now)
+        initial_patch_size = get_patch_size(patch_size[-dim:],
+                                            *rotation_for_DA.values(),
+                                            (0.85, 1.25))
+        if do_dummy_2d_data_aug:
+            initial_patch_size[0] = patch_size[0]
+
+        self.print_to_log_file(f'do_dummy_2d_data_aug: {do_dummy_2d_data_aug}')
+        self.inference_allowed_mirroring_axes = mirror_axes
+
+        return rotation_for_DA, do_dummy_2d_data_aug, initial_patch_size, mirror_axes             
         
     def print_to_log_file(self, *args, also_print_to_console=True, add_timestamp=True):        
         timestamp = time()
@@ -251,6 +425,8 @@ class nnUNetLightningModule(pl.LightningModule):
         #     if checkpoint['grad_scaler_state'] is not None:
         #         self.grad_scaler.load_state_dict(checkpoint['grad_scaler_state'])
 
+                                          
+
     def prepare_data(self):
         """
         This is where you can put the code that runs ONLY once before training starts. ie.
@@ -288,17 +464,18 @@ class nnUNetLightningModule(pl.LightningModule):
                                                                 self.dataset_json)        
         
         self.model = self.build_network_architecture(self.plans_manager, self.dataset_json, self.configuration_manager,
-                                                     self.num_input_channels, enable_deep_supervision=True).to(self.device)
+                                                     self.num_input_channels, enable_deep_supervision=True)
         
         # compile network for free speedup
         if self._do_i_compile():
             self.print_to_log_file('Compiling network...')
             self.model = torch.compile(self.model)
 
+    def _do_i_compile(self):
+        return ('nnUNet_compile' in os.environ.keys()) and (os.environ['nnUNet_compile'].lower() in ('true', '1', 't'))
+
     def setup(self, stage: str):
         if (stage == 'fit' or stage is None) and not self.setup_complete:
-            if self.model is None:
-                self.set_model()                                        
 
             self.loss = self._build_loss()
             self.was_initialized = True
