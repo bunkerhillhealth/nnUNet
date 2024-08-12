@@ -176,7 +176,7 @@ class DC_and_BCE_loss_noDDP(nn.Module):
         self.use_ignore_label = use_ignore_label
 
         self.ce = nn.BCEWithLogitsLoss(**bce_kwargs)
-        self.dc = dice_class(apply_nonlin=torch.sigmoid, **soft_dice_kwargs)
+        self.dc = MemoryEfficientSoftDiceLoss_noDPP(apply_nonlin=torch.sigmoid, **soft_dice_kwargs)
 
     def forward(self, net_output: torch.Tensor, target: torch.Tensor):
         if self.use_ignore_label:
