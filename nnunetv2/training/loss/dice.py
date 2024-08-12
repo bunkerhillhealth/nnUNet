@@ -159,12 +159,12 @@ class MemoryEfficientSoftDiceLoss(nn.Module):
         dc = dc.mean()
         return -dc
     
-class MemoryEfficientSoftDiceLoss_noDPP(nn.Module):
+class MemoryEfficientSoftDiceLoss_noDDP(nn.Module):
     def __init__(self, apply_nonlin: Callable = None, batch_dice: bool = False, do_bg: bool = True, smooth: float = 1.):
         """
         saves 1.6 GB on Dataset017 3d_lowres
         """
-        super(MemoryEfficientSoftDiceLoss_noDPP, self).__init__()
+        super(MemoryEfficientSoftDiceLoss_noDDP, self).__init__()
 
         self.do_bg = do_bg
         self.batch_dice = batch_dice
