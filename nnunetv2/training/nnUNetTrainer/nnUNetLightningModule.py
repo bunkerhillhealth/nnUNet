@@ -71,7 +71,9 @@ from nnunetv2.training.dataloading.utils import (get_case_identifiers,
                                                  unpack_dataset)
 from nnunetv2.training.logging.nnunet_logger import nnUNetLogger
 from nnunetv2.training.loss.compound_losses import (DC_and_BCE_loss,
-                                                    DC_and_CE_loss)
+                                                    DC_and_CE_loss, 
+                                                    DC_and_BCE_loss_noDDP, 
+                                                    DC_and_CE_loss_noDDP)
 from nnunetv2.training.loss.deep_supervision import DeepSupervisionWrapper
 from nnunetv2.training.loss.dice import (MemoryEfficientSoftDiceLoss,
                                          get_tp_fp_fn_tn)
@@ -492,14 +494,14 @@ class nnUNetLightningModule(pl.LightningModule):
 
     def _build_loss(self):
         if self.label_manager.has_regions:
-            loss = DC_and_BCE_loss({},
+            loss = DC_and_BCE_loss_noDDP({},
                                    {'batch_dice': self.configuration_manager.batch_dice,
-                                    'do_bg': True, 'smooth': 1e-5, 'ddp': self.is_ddp},
+                                    'do_bg': True, 'smooth': 1e-5},
                                    use_ignore_label=self.label_manager.ignore_label is not None,
                                    dice_class=MemoryEfficientSoftDiceLoss)
         else:
-            loss = DC_and_CE_loss({'batch_dice': self.configuration_manager.batch_dice,
-                                   'smooth': 1e-5, 'do_bg': False, 'ddp': self.is_ddp}, {}, weight_ce=1, weight_dice=1,
+            loss = DC_and_CE_loss_noDDP({'batch_dice': self.configuration_manager.batch_dice,
+                                   'smooth': 1e-5, 'do_bg': False}, {}, weight_ce=1, weight_dice=1,
                                   ignore_label=self.label_manager.ignore_label, dice_class=MemoryEfficientSoftDiceLoss)
 
         deep_supervision_scales = self._get_deep_supervision_scales()
