@@ -522,10 +522,8 @@ class nnUNetLightningModule(pl.LightningModule):
         This function is specific for the default architecture in nnU-Net. If you change the architecture, there are
         chances you need to change this as well!
         """
-        if self.is_ddp:
-            self.model.module.decoder.deep_supervision = enabled
-        else:
-            self.model.decoder.deep_supervision = enabled  
+
+        self.model.decoder.deep_supervision = enabled  
 
     def _save_debug_information(self):
         # saving some debug information
