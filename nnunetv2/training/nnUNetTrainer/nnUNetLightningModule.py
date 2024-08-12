@@ -492,6 +492,15 @@ class nnUNetLightningModule(pl.LightningModule):
 
             self.setup_complete = True
 
+    def print_plans(self):
+        if self.local_rank == 0:
+            dct = deepcopy(self.plans_manager.plans)
+            del dct['configurations']
+            self.print_to_log_file(f"\nThis is the configuration used by this "
+                                   f"training:\nConfiguration name: {self.configuration_name}\n",
+                                   self.configuration_manager, '\n', add_timestamp=False)
+            self.print_to_log_file('These are the global plan.json settings:\n', dct, '\n', add_timestamp=False)            
+
     def _build_loss(self):
         if self.label_manager.has_regions:
             loss = DC_and_BCE_loss_noDDP({},
@@ -794,7 +803,8 @@ class nnUNetLightningModule(pl.LightningModule):
         optimizer = torch.optim.SGD(self.model.parameters(), self.initial_lr, weight_decay=self.weight_decay,
                                     momentum=0.99, nesterov=True)
         lr_scheduler = PolyLRScheduler(optimizer, self.initial_lr, self.num_epochs)
-        return optimizer, lr_scheduler    
+        
+        return {"optimizer": optimizer, "lr_scheduler": lr_scheduler}
     
     def on_train_start(self):
         # All of the relevant logic is already in `setup` 
@@ -843,7 +853,7 @@ class nnUNetLightningModule(pl.LightningModule):
         l = self.loss(output, target)
         self.train_outputs.append({'loss': l.cpu().numpy()})
 
-        return l 
+        return l
 
     def on_train_epoch_end(self, outputs):
         outputs = collate_outputs(self.train_outputs)
