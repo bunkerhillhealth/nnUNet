@@ -61,7 +61,7 @@ class SoftDiceLoss_noDDP(nn.Module):
                 clip_tp: float = None):
         """
         """
-        super(SoftDiceLoss, self).__init__()
+        super(SoftDiceLoss_noDDP, self).__init__()
 
         self.do_bg = do_bg
         self.batch_dice = batch_dice
@@ -164,7 +164,7 @@ class MemoryEfficientSoftDiceLoss_noDPP(nn.Module):
         """
         saves 1.6 GB on Dataset017 3d_lowres
         """
-        super(MemoryEfficientSoftDiceLoss, self).__init__()
+        super(MemoryEfficientSoftDiceLoss_noDPP, self).__init__()
 
         self.do_bg = do_bg
         self.batch_dice = batch_dice

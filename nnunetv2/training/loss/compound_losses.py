@@ -72,7 +72,7 @@ class DC_and_CE_loss_noDDP(nn.Module):
         :param weight_ce:
         :param weight_dice:
         """
-        super(DC_and_CE_loss, self).__init__()
+        super(DC_and_CE_loss_noDDP, self).__init__()
         if ignore_label is not None:
             ce_kwargs['ignore_index'] = ignore_label
 
@@ -167,7 +167,7 @@ class DC_and_BCE_loss_noDDP(nn.Module):
         :param bce_kwargs:
         :param aggregate:
         """
-        super(DC_and_BCE_loss, self).__init__()
+        super(DC_and_BCE_loss_noDDP, self).__init__()
         if use_ignore_label:
             bce_kwargs['reduction'] = 'none'
 
