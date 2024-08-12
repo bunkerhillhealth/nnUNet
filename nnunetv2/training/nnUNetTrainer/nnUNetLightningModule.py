@@ -827,7 +827,7 @@ class nnUNetLightningModule(pl.LightningModule):
         output = self.model(data)
         
         l = self.loss(output, target)
-        self.train_outputs.append({'loss': l.cpu().numpy()})
+        self.train_outputs.append({'loss': l.detach().cpu().numpy()})
 
         return l
 
@@ -924,7 +924,7 @@ class nnUNetLightningModule(pl.LightningModule):
             fp_hard = fp_hard[1:]
             fn_hard = fn_hard[1:]
 
-        self.val_outputs.append({'loss': l.cpu().numpy(), 'tp_hard': tp_hard, 'fp_hard': fp_hard, 'fn_hard': fn_hard})
+        self.val_outputs.append({'loss': l.detach().cpu().numpy(), 'tp_hard': tp_hard, 'fp_hard': fp_hard, 'fn_hard': fn_hard})
         return l        
 
     def on_validation_epoch_end(self):
