@@ -812,6 +812,7 @@ class nnUNetLightningModule(pl.LightningModule):
             f"Current learning rate: {np.round(self.optimizers().optimizer.param_groups[0]['lr'], decimals=5)}")
         # lrs are the same for all workers so we don't need to gather them in case of DDP training
         self.nnUNet_logger.log('lrs', self.optimizers().optimizer.param_groups[0]['lr'], self.manual_current_epoch)
+        self.nnUNet_logger.log('epoch_start_timestamps', time(), self.manual_current_epoch)
 
         self.train_outputs = []
 
@@ -961,8 +962,6 @@ class nnUNetLightningModule(pl.LightningModule):
         self.nnUNet_logger.log('mean_fg_dice', mean_fg_dice, self.manual_current_epoch)
         self.nnUNet_logger.log('dice_per_class_or_region', global_dc_per_class, self.manual_current_epoch)
         self.nnUNet_logger.log('val_losses', loss_here, self.manual_current_epoch)
-    def on_epoch_start(self):
-        self.nnUNet_logger.log('epoch_start_timestamps', time(), self.manual_current_epoch)
 
     def on_train_end(self):
         self.save_checkpoint(join(self.output_folder, "checkpoint_final.pth"))
@@ -973,3 +972,28 @@ class nnUNetLightningModule(pl.LightningModule):
         
         empty_cache(self.device)
         self.print_to_log_file("Training done.")
+
+    def save_checkpoint(self, filename: str) -> None:
+        if self.local_rank == 0:
+            if not self.disable_checkpointing:
+                if self.is_ddp:
+                    mod = self.network.module
+                else:
+                    mod = self.network
+                if isinstance(mod, OptimizedModule):
+                    mod = mod._orig_mod
+
+                checkpoint = {
+                    'network_weights': mod.state_dict(),
+                    'optimizer_state': self.optimizer.state_dict(),
+                    'grad_scaler_state': self.grad_scaler.state_dict() if self.grad_scaler is not None else None,
+                    'logging': self.logger.get_checkpoint(),
+                    '_best_ema': self._best_ema,
+                    'current_epoch': self.current_epoch + 1,
+                    'init_args': self.my_init_kwargs,
+                    'trainer_name': self.__class__.__name__,
+                    'inference_allowed_mirroring_axes': self.inference_allowed_mirroring_axes,
+                }
+                torch.save(checkpoint, filename)
+            else:
+                self.print_to_log_file('No checkpoint written, checkpointing is disabled')
