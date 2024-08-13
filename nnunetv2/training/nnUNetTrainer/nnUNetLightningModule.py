@@ -975,19 +975,15 @@ class nnUNetLightningModule(pl.LightningModule):
 
     def save_checkpoint(self, filename: str) -> None:
         if self.local_rank == 0:
-            if not self.disable_checkpointing:
-                if self.is_ddp:
-                    mod = self.network.module
-                else:
-                    mod = self.network
+            if not self.disable_checkpointing:                            
+                mod = self.model
                 if isinstance(mod, OptimizedModule):
                     mod = mod._orig_mod
 
                 checkpoint = {
                     'network_weights': mod.state_dict(),
-                    'optimizer_state': self.optimizer.state_dict(),
-                    'grad_scaler_state': self.grad_scaler.state_dict() if self.grad_scaler is not None else None,
-                    'logging': self.logger.get_checkpoint(),
+                    'optimizer_state': self.optimizers().optimizer.state_dict(),                    
+                    'logging': self.nnUNet_logger.get_checkpoint(),
                     '_best_ema': self._best_ema,
                     'current_epoch': self.current_epoch + 1,
                     'init_args': self.my_init_kwargs,
