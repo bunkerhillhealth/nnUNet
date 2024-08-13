@@ -831,7 +831,7 @@ class nnUNetLightningModule(pl.LightningModule):
 
         return l
 
-    def on_train_epoch_end(self, outputs):
+    def on_train_epoch_end(self):
         outputs = collate_outputs(self.train_outputs)
 
         # TO gather and log losses in the same way as nnUNet
