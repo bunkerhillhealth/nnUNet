@@ -396,7 +396,7 @@ class nnUNetLightningModule(pl.LightningModule):
         else:
             self.model.load_state_dict(new_state_dict)
 
-        self.optimizer.load_state_dict(checkpoint['optimizer_state'])
+        self.optimizers().optimizer.load_state_dict(checkpoint['optimizer_state'])
 
         # Not sure about this part - I think lightning handles this internally .. 
         # if self.grad_scaler is not None:
@@ -845,6 +845,8 @@ class nnUNetLightningModule(pl.LightningModule):
         else:
             loss_here = np.mean(outputs['loss'])
 
+        self.manual_current_epoch += 1
+
         self.nnUNet_logger.log('train_losses', loss_here, self.manual_current_epoch)
 
         # Also add on_epoch_end content here .. 
@@ -888,7 +890,7 @@ class nnUNetLightningModule(pl.LightningModule):
         l = self.loss([output], [target])
 
         # the following is needed for online evaluation. Fake dice (green line)
-        axes = [0] + list(range(2, output[0].ndim))
+        axes = [0] + list(range(2, output.ndim))
 
         if self.label_manager.has_regions:
             predicted_segmentation_onehot = (torch.sigmoid(output) > 0.5).long()
