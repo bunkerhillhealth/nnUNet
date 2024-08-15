@@ -76,7 +76,7 @@ from nnunetv2.training.loss.compound_losses import (DC_and_BCE_loss,
                                                     DC_and_CE_loss_noDDP)
 from nnunetv2.training.loss.deep_supervision import DeepSupervisionWrapper
 from nnunetv2.training.loss.dice import (MemoryEfficientSoftDiceLoss,
-                                        MemoryEfficientSoftDiceLoss_noDDP,
+                                         MemoryEfficientSoftDiceLoss_noDDP,
                                          get_tp_fp_fn_tn)
 from nnunetv2.training.lr_scheduler.polylr import PolyLRScheduler
 from nnunetv2.utilities.collate_outputs import collate_outputs
@@ -396,7 +396,12 @@ class nnUNetLightningModule(pl.LightningModule):
         else:
             self.model.load_state_dict(new_state_dict)
 
-        self.optimizers().optimizer.load_state_dict(checkpoint['optimizer_state'])
+        # Set up the optimizer
+        self.nnUNet_optimizer = torch.optim.SGD(self.model.parameters(), self.initial_lr, weight_decay=self.weight_decay,
+                            momentum=0.99, nesterov=True)
+        self.nnUNet_lr_scheduler = PolyLRScheduler(self.nnUNet_optimizer, self.initial_lr, self.num_epochs)
+
+        self.nnUNet_optimizer.load_state_dict(checkpoint['optimizer_state'])
 
         # Not sure about this part - I think lightning handles this internally .. 
         # if self.grad_scaler is not None:
@@ -776,9 +781,15 @@ class nnUNetLightningModule(pl.LightningModule):
         return val_transforms    
         
     def configure_optimizers(self):
-        optimizer = torch.optim.SGD(self.model.parameters(), self.initial_lr, weight_decay=self.weight_decay,
-                                    momentum=0.99, nesterov=True)
-        lr_scheduler = PolyLRScheduler(optimizer, self.initial_lr, self.num_epochs)
+        #TODO: This is just so that the checkpoint loading works using nnUNet functionality
+        # Would want to move to Lightning based checkpointing
+        if self.nnUNet_optimizer is None:
+            optimizer = torch.optim.SGD(self.model.parameters(), self.initial_lr, weight_decay=self.weight_decay,
+                                        momentum=0.99, nesterov=True)
+            lr_scheduler = PolyLRScheduler(optimizer, self.initial_lr, self.num_epochs)
+        else:
+            optimizer = self.nnUNet_optimizer
+            lr_scheduler = self.nnUNet_lr_scheduler
         
         return {"optimizer": optimizer, "lr_scheduler": lr_scheduler}
     
