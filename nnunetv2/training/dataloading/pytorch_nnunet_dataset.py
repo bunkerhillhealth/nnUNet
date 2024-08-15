@@ -120,11 +120,6 @@ class nnUNetPytorchDataset(Dataset):
         else:
             data = np.load(entry["data_file"])["data"]
 
-        if os.path.isfile(entry["data_file"][:-4] + "-padded.npy"):
-            data = np.load(entry["data_file"][:-4] + ".npy", "r")
-        else:
-            data = np.load(entry["data_file"])["data"]
-
         if os.path.isfile(entry["data_file"][:-4] + "_seg.npy"):
             seg = np.load(entry["data_file"][:-4] + "_seg.npy", "r")
         else:
@@ -259,8 +254,6 @@ class nnUNetPytorchDataset(Dataset):
             end_time = time.time()
             times.append(end_time - start_time)
             start_time = end_time
-
-            # log.info("Applied transforms", idx=idx)
 
             return (
                 data_dict_["data"][0],
