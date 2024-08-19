@@ -82,12 +82,17 @@ from nnunetv2.training.lr_scheduler.polylr import PolyLRScheduler
 from nnunetv2.utilities.collate_outputs import collate_outputs
 from nnunetv2.utilities.default_n_proc_DA import get_allowed_n_proc_DA
 from nnunetv2.utilities.file_path_utilities import check_workers_alive_and_busy
+from nnunetv2.utilities.get_batch_size_oversample_fg_percent import \
+    get_batch_size_overground_sample_percentage
 from nnunetv2.utilities.get_network_from_plans import get_network_from_plans
 from nnunetv2.utilities.helpers import dummy_context, empty_cache
 from nnunetv2.utilities.label_handling.label_handling import (
     convert_labelmap_to_one_hot, determine_num_input_channels)
 from nnunetv2.utilities.plans_handling.plans_handler import (
     ConfigurationManager, PlansManager)
+
+from nnunetv2.utilities.get_rotation_for_DA_values import get_rotation_for_dummyDA_values
+from nnunetv2.utilities.print_to_log_file import print_log_to_file
 
 
 class nnUNetLightningModule(pl.LightningModule):
@@ -162,7 +167,8 @@ class nnUNetLightningModule(pl.LightningModule):
         self.model = None  
         self.optimizer = self.lr_scheduler = None  # -> self.initialize
         # self.grad_scaler = GradScaler() if self.device.type == 'cuda' else None
-        self.loss = None  # -> self.initialize        
+        self.loss = None  # -> self.initialize       
+        self.nnUNet_optimizer = None 
 
         ### Simple logging. Don't take that away from me!
         # initialize log file. This is just our log for the print statements etc. Not to be confused with lightning
@@ -182,15 +188,14 @@ class nnUNetLightningModule(pl.LightningModule):
         self.allowed_num_processes = get_allowed_n_proc_DA()
 
         ### inference things
-        self.inference_allowed_mirroring_axes = None  # this variable is set in
-        # self.configure_rotation_dummyDA_mirroring_and_inital_patch_size and will be saved in checkpoints
+        self.inference_allowed_mirroring_axes = None  # this variable is set in        
 
         ### checkpoint saving stuff
         self.save_every = 50
         self.disable_checkpointing = False
-
+        
         # set batch size to what the plan says - Lightning will aut-split it into the different GPUs
-        self.batch_size = self.configuration_manager.batch_size
+        self.batch_size = self.configuration_manager.batch_size        
 
         self.was_initialized = False
 
@@ -208,25 +213,7 @@ class nnUNetLightningModule(pl.LightningModule):
                                    configuration_manager: ConfigurationManager,
                                    num_input_channels,
                                    enable_deep_supervision: bool = True) -> nn.Module:
-        """
-        his is where you build the architecture according to the plans. There is no obligation to use
-        get_network_from_plans, this is just a utility we use for the nnU-Net default architectures. You can do what
-        you want. Even ignore the plans and just return something static (as long as it can process the requested
-        patch size)
-        but don't bug us with your bugs arising from fiddling with this :-P
-        This is the function that is called in inference as well! This is needed so that all network architecture
-        variants can be loaded at inference time (inference will use the same nnUNetTrainer that was used for
-        training, so if you change the network architecture during training by deriving a new trainer class then
-        inference will know about it).
 
-        If you need to know how many segmentation outputs your custom architecture needs to have, use the following snippet:
-        > label_manager = plans_manager.get_label_manager(dataset_json)
-        > label_manager.num_segmentation_heads
-        (why so complicated? -> We can have either classical training (classes) or regions. If we have regions,
-        the number of outputs is != the number of classes. Also there is the ignore label for which no output
-        should be generated. label_manager takes care of all that for you.)
-
-        """
         return get_network_from_plans(plans_manager, dataset_json, configuration_manager,
                                       num_input_channels, deep_supervision=enable_deep_supervision)
 
@@ -235,52 +222,20 @@ class nnUNetLightningModule(pl.LightningModule):
             self.configuration_manager.pool_op_kernel_sizes), axis=0))[:-1]
         return deep_supervision_scales
 
-    def _set_batch_size_and_oversample(self):
-        if not self.trainer.strategy.strategy_name == 'ddp':
-            # set batch size to what the plan says, leave oversample untouched
-            self.batch_size = self.configuration_manager.batch_size
-        else:
-            # batch size is distributed over DDP workers and we need to change oversample_percent for each worker
-            batch_sizes = []
-            oversample_percents = []
-
-            world_size = dist.get_world_size()
-            my_rank = dist.get_rank()
+    def _set_batch_size_and_oversample(self):        
+        # batch size is distributed over DDP workers (Lightning will do this)
+        #  we need to change oversample_percent for each worker
+        if self.trainer.strategy.strategy_name == 'ddp':
+            world_size = self.trainer.world_size
+            my_rank = self.trainer.local_rank
 
             global_batch_size = self.configuration_manager.batch_size
             assert global_batch_size >= world_size, 'Cannot run DDP if the batch size is smaller than the number of ' \
                                                     'GPUs... Duh.'
 
-            batch_size_per_GPU = np.ceil(global_batch_size / world_size).astype(int)
-
-            for rank in range(world_size):
-                if (rank + 1) * batch_size_per_GPU > global_batch_size:
-                    batch_size = batch_size_per_GPU - ((rank + 1) * batch_size_per_GPU - global_batch_size)
-                else:
-                    batch_size = batch_size_per_GPU
-
-                batch_sizes.append(batch_size)
-
-                sample_id_low = 0 if len(batch_sizes) == 0 else np.sum(batch_sizes[:-1])
-                sample_id_high = np.sum(batch_sizes)
-
-                if sample_id_high / global_batch_size < (1 - self.oversample_foreground_percent):
-                    oversample_percents.append(0.0)
-                elif sample_id_low / global_batch_size > (1 - self.oversample_foreground_percent):
-                    oversample_percents.append(1.0)
-                else:
-                    percent_covered_by_this_rank = sample_id_high / global_batch_size - sample_id_low / global_batch_size
-                    oversample_percent_here = 1 - (((1 - self.oversample_foreground_percent) -
-                                                    sample_id_low / global_batch_size) / percent_covered_by_this_rank)
-                    oversample_percents.append(oversample_percent_here)
-
-            print("worker", my_rank, "oversample", oversample_percents[my_rank])
-            print("worker", my_rank, "batch_size", batch_sizes[my_rank])
-            # self.print_to_log_file("worker", my_rank, "oversample", oversample_percents[my_rank])
-            # self.print_to_log_file("worker", my_rank, "batch_size", batch_sizes[my_rank])
-
-            self.batch_size = batch_sizes[my_rank]
-            self.oversample_foreground_percent = oversample_percents[my_rank]
+            # No need to set the batch size becai
+            _, self.oversample_foreground_percent = get_batch_size_overground_sample_percentage(
+                world_size, my_rank, global_batch_size, self.oversample_foreground_percent)
 
     def configure_rotation_dummyDA_mirroring_and_inital_patch_size(self):
         """
@@ -288,43 +243,8 @@ class nnUNetLightningModule(pl.LightningModule):
         """
         patch_size = self.configuration_manager.patch_size
         dim = len(patch_size)
-        # todo rotation should be defined dynamically based on patch size (more isotropic patch sizes = more rotation)
-        if dim == 2:
-            do_dummy_2d_data_aug = False
-            # todo revisit this parametrization
-            if max(patch_size) / min(patch_size) > 1.5:
-                rotation_for_DA = {
-                    'x': (-15. / 360 * 2. * np.pi, 15. / 360 * 2. * np.pi),
-                    'y': (0, 0),
-                    'z': (0, 0)
-                }
-            else:
-                rotation_for_DA = {
-                    'x': (-180. / 360 * 2. * np.pi, 180. / 360 * 2. * np.pi),
-                    'y': (0, 0),
-                    'z': (0, 0)
-                }
-            mirror_axes = (0, 1)
-        elif dim == 3:
-            # todo this is not ideal. We could also have patch_size (64, 16, 128) in which case a full 180deg 2d rot would be bad
-            # order of the axes is determined by spacing, not image size
-            do_dummy_2d_data_aug = (max(patch_size) / patch_size[0]) > ANISO_THRESHOLD
-            if do_dummy_2d_data_aug:
-                # why do we rotate 180 deg here all the time? We should also restrict it
-                rotation_for_DA = {
-                    'x': (-180. / 360 * 2. * np.pi, 180. / 360 * 2. * np.pi),
-                    'y': (0, 0),
-                    'z': (0, 0)
-                }
-            else:
-                rotation_for_DA = {
-                    'x': (-30. / 360 * 2. * np.pi, 30. / 360 * 2. * np.pi),
-                    'y': (-30. / 360 * 2. * np.pi, 30. / 360 * 2. * np.pi),
-                    'z': (-30. / 360 * 2. * np.pi, 30. / 360 * 2. * np.pi),
-                }
-            mirror_axes = (0, 1, 2)
-        else:
-            raise RuntimeError()
+
+        rotation_for_DA, do_dummy_2d_data_aug, mirror_axes = get_rotation_for_dummyDA_values(patch_size)
 
         # todo this function is stupid. It doesn't even use the correct scale range (we keep things as they were in the
         #  old nnunet for now)
@@ -339,34 +259,9 @@ class nnUNetLightningModule(pl.LightningModule):
 
         return rotation_for_DA, do_dummy_2d_data_aug, initial_patch_size, mirror_axes             
         
-    def print_to_log_file(self, *args, also_print_to_console=True, add_timestamp=True):        
-        timestamp = time()
-        dt_object = datetime.fromtimestamp(timestamp)
+    def print_to_log_file(self, *args, also_print_to_console=True, add_timestamp=True):                
+        print_log_to_file(self.log_file, *args, also_print_to_console=also_print_to_console, add_timestamp=add_timestamp)
 
-        if add_timestamp:
-            args = (f"{dt_object}:", *args)
-
-        successful = False
-        max_attempts = 5
-        ctr = 0
-        while not successful and ctr < max_attempts:
-            try:
-                with open(self.log_file, 'a+') as f:
-                    for a in args:
-                        f.write(str(a))
-                        f.write(" ")
-                    f.write("\n")
-                successful = True
-            except IOError:
-                print(f"{datetime.fromtimestamp(timestamp)}: failed to log: ", sys.exc_info())
-                sleep(0.5)
-                ctr += 1
-        if also_print_to_console:
-            print(*args)
-        elif also_print_to_console:
-            print(*args)        
-
-    
     # TODO: Lighting has an inbuilt load checkpoint functionality
     # We should switch to that
     def load_checkpoint(self, filename_or_checkpoint: Union[dict, str]) -> None:
@@ -470,6 +365,8 @@ class nnUNetLightningModule(pl.LightningModule):
 
             self.print_plans()
             empty_cache(self.device)
+
+            self._set_batch_size_and_oversample()
 
             self.setup_complete = True
 
