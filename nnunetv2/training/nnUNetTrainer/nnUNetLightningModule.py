@@ -80,19 +80,21 @@ from nnunetv2.training.loss.dice import (MemoryEfficientSoftDiceLoss,
                                          get_tp_fp_fn_tn)
 from nnunetv2.training.lr_scheduler.polylr import PolyLRScheduler
 from nnunetv2.utilities.collate_outputs import collate_outputs
+from nnunetv2.utilities.data_split_utilities import *
 from nnunetv2.utilities.default_n_proc_DA import get_allowed_n_proc_DA
 from nnunetv2.utilities.file_path_utilities import check_workers_alive_and_busy
 from nnunetv2.utilities.get_batch_size_oversample_fg_percent import \
     get_batch_size_overground_sample_percentage
 from nnunetv2.utilities.get_network_from_plans import get_network_from_plans
+from nnunetv2.utilities.get_rotation_for_DA_values import \
+    get_rotation_for_dummyDA_values
 from nnunetv2.utilities.helpers import dummy_context, empty_cache
 from nnunetv2.utilities.label_handling.label_handling import (
     convert_labelmap_to_one_hot, determine_num_input_channels)
 from nnunetv2.utilities.plans_handling.plans_handler import (
     ConfigurationManager, PlansManager)
-
-from nnunetv2.utilities.get_rotation_for_DA_values import get_rotation_for_dummyDA_values
 from nnunetv2.utilities.print_to_log_file import print_log_to_file
+from nnunetv2.utilities.validation_utils import *
 
 
 class nnUNetLightningModule(pl.LightningModule):
@@ -298,12 +300,10 @@ class nnUNetLightningModule(pl.LightningModule):
 
         self.nnUNet_optimizer.load_state_dict(checkpoint['optimizer_state'])
 
-        # Not sure about this part - I think lightning handles this internally .. 
+        # Not sure about this part - I think lightning handles this internally - Leaving here for comments, will remove after
         # if self.grad_scaler is not None:
         #     if checkpoint['grad_scaler_state'] is not None:
-        #         self.grad_scaler.load_state_dict(checkpoint['grad_scaler_state'])
-
-                                          
+        #         self.grad_scaler.load_state_dict(checkpoint['grad_scaler_state'])                                          
 
     def prepare_data(self):
         """
@@ -337,7 +337,6 @@ class nnUNetLightningModule(pl.LightningModule):
         self._save_debug_information()            
     
     def set_model(self):
-
         self.num_input_channels = determine_num_input_channels(self.plans_manager, self.configuration_manager,
                                                                 self.dataset_json)        
         
@@ -354,20 +353,14 @@ class nnUNetLightningModule(pl.LightningModule):
 
     def setup(self, stage: str):
         if (stage == 'fit' or stage is None) and not self.setup_complete:
-
             self.loss = self._build_loss()
             self.was_initialized = True
-
             self.train_dataset, self.val_dataset = self.get_tr_and_val_datasets()
-
             # make sure deep supervision is on in the network
             self.set_deep_supervision_enabled(True)
-
             self.print_plans()
             empty_cache(self.device)
-
             self._set_batch_size_and_oversample()
-
             self.setup_complete = True
 
     def print_plans(self):
@@ -409,7 +402,6 @@ class nnUNetLightningModule(pl.LightningModule):
         This function is specific for the default architecture in nnU-Net. If you change the architecture, there are
         chances you need to change this as well!
         """
-
         self.model.decoder.deep_supervision = enabled  
 
     def _save_debug_information(self):
@@ -470,16 +462,7 @@ class nnUNetLightningModule(pl.LightningModule):
             # if the split file does not exist we need to create it
             if not isfile(splits_file):
                 self.print_to_log_file("Creating new 5-fold cross-validation split...")
-                splits = []
-                all_keys_sorted = np.sort(list(dataset.keys()))
-                kfold = KFold(n_splits=5, shuffle=True, random_state=12345)
-                for i, (train_idx, test_idx) in enumerate(kfold.split(all_keys_sorted)):
-                    train_keys = np.array(all_keys_sorted)[train_idx]
-                    test_keys = np.array(all_keys_sorted)[test_idx]
-                    splits.append({})
-                    splits[-1]['train'] = list(train_keys)
-                    splits[-1]['val'] = list(test_keys)
-                save_json(splits, splits_file)
+                create_split_file(splits_file, dataset)
 
             else:
                 self.print_to_log_file("Using splits from existing split file:", splits_file)
@@ -496,13 +479,9 @@ class nnUNetLightningModule(pl.LightningModule):
                 self.print_to_log_file("INFO: You requested fold %d for training but splits "
                                        "contain only %d folds. I am now creating a "
                                        "random (but seeded) 80:20 split!" % (self.fold, len(splits)))
+                
                 # if we request a fold that is not in the split file, create a random 80:20 split
-                rnd = np.random.RandomState(seed=12345 + self.fold)
-                keys = np.sort(list(dataset.keys()))
-                idx_tr = rnd.choice(len(keys), int(len(keys) * 0.8), replace=False)
-                idx_val = [i for i in range(len(keys)) if i not in idx_tr]
-                tr_keys = [keys[i] for i in idx_tr]
-                val_keys = [keys[i] for i in idx_val]
+                tr_keys, val_keys = create_random_split(self.fold, dataset)
                 self.print_to_log_file("This random 80:20 split has %d training and %d validation cases."
                                        % (len(tr_keys), len(val_keys)))
             if any([i in val_keys for i in tr_keys]):
@@ -786,7 +765,6 @@ class nnUNetLightningModule(pl.LightningModule):
     def on_validation_epoch_start(self):
         self.val_outputs = []
 
-
     def validation_step(self, batch, batch_idx):
         data, target = batch
         output = self.model(data)
@@ -800,26 +778,10 @@ class nnUNetLightningModule(pl.LightningModule):
         # the following is needed for online evaluation. Fake dice (green line)
         axes = [0] + list(range(2, output.ndim))
 
-        if self.label_manager.has_regions:
-            predicted_segmentation_onehot = (torch.sigmoid(output) > 0.5).long()
-        else:
-            # no need for softmax
-            output_seg = output.argmax(1)[:, None]
-            predicted_segmentation_onehot = torch.zeros(output.shape, device=output.device, dtype=torch.float32)
-            predicted_segmentation_onehot.scatter_(1, output_seg, 1)
-            del output_seg
-
-        if self.label_manager.has_ignore_label:
-            if not self.label_manager.has_regions:
-                mask = (target != self.label_manager.ignore_label).float()
-                # CAREFUL that you don't rely on target after this line!
-                target[target == self.label_manager.ignore_label] = 0
-            else:
-                mask = 1 - target[:, -1:]
-                # CAREFUL that you don't rely on target after this line!
-                target = target[:, :-1]
-        else:
-            mask = None
+        predicted_segmentation_onehot, target, mask = process_output_target_for_val(self.label_manager.has_regions,
+                                                                                     self.label_manager.ignore_label,
+                                                                                     self.label_manager.ignore_label,
+                                                                                     output, target)
 
         tp, fp, fn, _ = get_tp_fp_fn_tn(predicted_segmentation_onehot, target, axes=axes, mask=mask)
 
@@ -844,9 +806,11 @@ class nnUNetLightningModule(pl.LightningModule):
         fp = np.sum(outputs_collated['fp_hard'], 0)
         fn = np.sum(outputs_collated['fn_hard'], 0)
 
-        #TODO: Ideally we should not have to do this at all !!! even for logging ..... 
+        #TODO: Ideally we should not have to do this at all !!! even for logging
+        # This is probably not going to work in the multi-GPU setting
         if self.trainer.strategy.strategy_name == 'ddp':
-            world_size = dist.get_world_size()
+            
+            world_size = self.trainer.world_size
 
             tps = [None for _ in range(world_size)]
             dist.all_gather_object(tps, tp)
