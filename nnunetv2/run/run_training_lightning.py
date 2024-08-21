@@ -182,9 +182,9 @@ def run_training(
         trainer = pl.Trainer(
             max_epochs=1000,
             devices=num_gpus,
-            precision=16,
+            precision='16-mixed',
             gradient_clip_val=12.0,
-            distributed_backend="ddp",
+            strategy="ddp",
         )
 
     trainer.fit(nnunet_module)

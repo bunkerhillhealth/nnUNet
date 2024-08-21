@@ -196,8 +196,8 @@ class nnUNetLightningModule(pl.LightningModule):
         self.save_every = 50
         self.disable_checkpointing = False
         
-        # set batch size to what the plan says - Lightning will aut-split it into the different GPUs
-        self.batch_size = self.configuration_manager.batch_size        
+        # set batch size to what the plan says 
+        # self.batch_size = self.configuration_manager.batch_size        
 
         self.was_initialized = False
 
@@ -227,7 +227,7 @@ class nnUNetLightningModule(pl.LightningModule):
     def _set_batch_size_and_oversample(self):        
         # batch size is distributed over DDP workers (Lightning will do this)
         #  we need to change oversample_percent for each worker
-        if self.trainer.strategy.strategy_name == 'ddp':
+        if type(self.trainer.strategy).__name__ == 'DDPStrategy':
             world_size = self.trainer.world_size
             my_rank = self.trainer.local_rank
 
@@ -236,8 +236,8 @@ class nnUNetLightningModule(pl.LightningModule):
                                                     'GPUs... Duh.'
 
             # No need to set the batch size becai
-            _, self.oversample_foreground_percent = get_batch_size_overground_sample_percentage(
-                world_size, my_rank, global_batch_size, self.oversample_foreground_percent)
+            self.batch_size, self.oversample_foreground_percent = get_batch_size_overground_sample_percentage(
+                world_size, my_rank, global_batch_size, self.oversample_foreground_percent)                    
 
     def configure_rotation_dummyDA_mirroring_and_inital_patch_size(self):
         """
@@ -724,7 +724,7 @@ class nnUNetLightningModule(pl.LightningModule):
 
         # TO gather and log losses in the same way as nnUNet
         #TODO: Ideally we should not have to do this at all !!! even for logging ..... 
-        if self.trainer.strategy.strategy_name == 'ddp':
+        if type(self.trainer.strategy).__name__ == 'DDPStrategy':
             # Use PyTorch Lightning's all_gather
             gathered_outputs = self.trainer.accelerator_backend.all_gather(outputs['loss'])
             losses_tr = gathered_outputs.cpu().numpy()
@@ -808,7 +808,7 @@ class nnUNetLightningModule(pl.LightningModule):
 
         #TODO: Ideally we should not have to do this at all !!! even for logging
         # This is probably not going to work in the multi-GPU setting
-        if self.trainer.strategy.strategy_name == 'ddp':
+        if type(self.trainer.strategy).__name__ == 'DDPStrategy':
             
             world_size = self.trainer.world_size
 

@@ -43,4 +43,4 @@ def get_batch_size_overground_sample_percentage(
     print("worker", my_rank, "oversample", oversample_percents[my_rank])
     print("worker", my_rank, "batch_size", batch_sizes[my_rank])
 
-    return batch_sizes[my_rank], oversample_percents[my_rank]
+    return int(batch_sizes[my_rank]), oversample_percents[my_rank]
