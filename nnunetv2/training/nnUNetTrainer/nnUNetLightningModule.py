@@ -715,7 +715,7 @@ class nnUNetLightningModule(pl.LightningModule):
         output = self.model(data)
         
         l = self.loss(output, target)
-        self.train_outputs.append({'loss': l.detach().cpu().numpy()})
+        self.train_outputs.append({'loss': l})
 
         return l
 
@@ -726,9 +726,9 @@ class nnUNetLightningModule(pl.LightningModule):
         #TODO: Ideally we should not have to do this at all !!! even for logging ..... 
         if type(self.trainer.strategy).__name__ == 'DDPStrategy':
             # Use PyTorch Lightning's all_gather
-            gathered_outputs = self.trainer.accelerator_backend.all_gather(outputs['loss'])
-            losses_tr = gathered_outputs.cpu().numpy()
-            loss_here = np.mean(losses_tr)
+            dist.barrier()
+            gathered_outputs = self.all_gather(outputs['loss']).detach().cpu().numpy()
+            loss_here = np.mean(gathered_outputs)
         else:
             loss_here = np.mean(outputs['loss'])
 
@@ -756,7 +756,8 @@ class nnUNetLightningModule(pl.LightningModule):
         if self._best_ema is None or self.nnUNet_logger.my_fantastic_logging['ema_fg_dice'][-1] > self._best_ema:
             self._best_ema = self.nnUNet_logger.my_fantastic_logging['ema_fg_dice'][-1]
             self.print_to_log_file(f"Yayy! New best EMA pseudo Dice: {np.round(self._best_ema, decimals=4)}")
-            self.save_checkpoint(join(self.output_folder, 'checkpoint_best.pth'))
+            if self.local_rank == 0:
+                self.save_checkpoint(join(self.output_folder, 'checkpoint_best.pth'))
 
         if self.local_rank == 0:
             self.nnUNet_logger.plot_progress_png(self.output_folder)
