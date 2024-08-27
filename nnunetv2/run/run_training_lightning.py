@@ -19,19 +19,6 @@ from nnunetv2.utilities.dataset_name_id_conversion import maybe_convert_to_datas
 from nnunetv2.utilities.find_class_by_name import recursive_find_python_class
 
 
-def find_free_network_port() -> int:
-    """Finds a free port on localhost.
-
-    It is useful in single-node training when we don't want to connect to a real main node but have to set the
-    `MASTER_PORT` environment variable.
-    """
-    s = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-    s.bind(("", 0))
-    port = s.getsockname()[1]
-    s.close()
-    return port
-
-
 def get_lightning_module_from_args(
     dataset_name_or_id: Union[int, str],
     configuration: str,
