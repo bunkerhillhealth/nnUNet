@@ -298,12 +298,7 @@ class nnUNetLightningModule(pl.LightningModule):
                             momentum=0.99, nesterov=True)
         self.nnUNet_lr_scheduler = PolyLRScheduler(self.nnUNet_optimizer, self.initial_lr, self.num_epochs)
 
-        self.nnUNet_optimizer.load_state_dict(checkpoint['optimizer_state'])
-
-        # Not sure about this part - I think lightning handles this internally - Leaving here for comments, will remove after
-        # if self.grad_scaler is not None:
-        #     if checkpoint['grad_scaler_state'] is not None:
-        #         self.grad_scaler.load_state_dict(checkpoint['grad_scaler_state'])                                          
+        self.nnUNet_optimizer.load_state_dict(checkpoint['optimizer_state'])                                 
 
     def prepare_data(self):
         """
