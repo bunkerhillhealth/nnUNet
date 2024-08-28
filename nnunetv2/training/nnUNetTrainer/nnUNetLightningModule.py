@@ -164,12 +164,12 @@ class nnUNetLightningModule(pl.LightningModule):
         # labels can either be a list of int (regular training) or a list of tuples of int (region-based training)
         # needed for predictions. We do sigmoid in case of (overlapping) regions
 
-        self.num_input_channels = None  # -> self.initialize()
+        self.num_input_channels = None
         self.model = None  # -> self._get_network()
         self.model = None  
-        self.optimizer = self.lr_scheduler = None  # -> self.initialize
+        self.optimizer = self.lr_scheduler = None
         # self.grad_scaler = GradScaler() if self.device.type == 'cuda' else None
-        self.loss = None  # -> self.initialize       
+        self.loss = None
         self.nnUNet_optimizer = None 
 
         ### Simple logging. Don't take that away from me!
