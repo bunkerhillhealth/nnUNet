@@ -461,8 +461,8 @@ class nnUNetLightningModule(pl.LightningModule):
 
             else:
                 self.print_to_log_file("Using splits from existing split file:", splits_file)
-                splits = load_json(splits_file)
-                self.print_to_log_file(f"The split file contains {len(splits)} splits.")
+            splits = load_json(splits_file)
+            self.print_to_log_file(f"The split file contains {len(splits)} splits.")
 
             self.print_to_log_file("Desired fold for training: %d" % self.fold)
             if self.fold < len(splits):
